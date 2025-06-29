@@ -191,7 +191,6 @@ class AudioPlayerViewModel: ObservableObject {
         let playerItem = AVPlayerItem(asset: asset)
         self.player = AVPlayer(playerItem: playerItem)
 
-        // Load duration asynchronously using async API
         Task {
             do {
                 let duration = try await asset.load(.duration)
@@ -224,7 +223,7 @@ class AudioPlayerViewModel: ObservableObject {
         }
     }
 
-    func togglePlayPause(urlString: String) {
+    func togglePlayPause() {
         guard let player = player else { return }
 
         if isPlaying {
@@ -405,7 +404,7 @@ struct EpisodePlayerView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(spacing: 10) {
                 if let imageURL = episode.imageURL ?? podcastImageURL,
                     let url = URL(string: imageURL) {
                     AsyncImage(url: url) { image in
@@ -429,21 +428,21 @@ struct EpisodePlayerView: View {
                     .foregroundColor(.gray)
                     .multilineTextAlignment(.center)
 
-                HStack(spacing: 40) {
+                HStack(spacing: 30) {
                     Button(action: {audioVM.skipBackward()}) {
                         Image(systemName: "gobackward.15")
                             .font(.title)
                     }
-                    Button(action: {audioVM.togglePlayPause(urlString: episode.audioURL)}) {
+                    Button(action: {audioVM.togglePlayPause()}) {
                         Image(systemName: audioVM.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.largeTitle)
+                            .font(.system(size: 100))
                     }
                     Button(action: {audioVM.skipForward()}) {
                         Image(systemName: "goforward.15")
                             .font(.title)
                     }
                 }
-                .padding(.vertical)
+       //       .padding(.vertical)
                 
                 VStack(spacing: 12) {
                     HStack {
