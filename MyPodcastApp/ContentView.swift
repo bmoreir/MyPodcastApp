@@ -313,6 +313,8 @@ struct SearchView: View {
                             }
                             .frame(width: 60, height: 60)
                             .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.black, lineWidth: 0.5))
                             
                             VStack(alignment: .leading) {
                                 Text(podcast.collectionName)
@@ -415,6 +417,8 @@ struct EpisodePlayerView: View {
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.black, lineWidth: 0.5))
                     .padding(.top)
                 }
 
