@@ -173,16 +173,31 @@ class RSSParser: NSObject, XMLParserDelegate {
 
 
 class AudioPlayerViewModel: ObservableObject {
-    let episode: Episode
+    static let shared = AudioPlayerViewModel()
     
     private var timeObserverToken: Any?
     private var player: AVPlayer?
     
+    @Published var episode: Episode?
     @Published var isPlaying = false
     @Published var currentTime: Double = 0
     @Published var durationTime: Double = 0
+    @Published var currentEpisodeID: UUID? = nil //new
 
-    init(episode: Episode) {
+    private init() {}
+
+    deinit {
+        if let token = timeObserverToken {
+            player?.removeTimeObserver(token)
+        }
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    func load(episode: Episode) {
+        if self.episode?.audioURL == episode.audioURL {
+            return
+        }
+
         self.episode = episode
 
         guard let url = URL(string: episode.audioURL) else { return }
@@ -190,6 +205,7 @@ class AudioPlayerViewModel: ObservableObject {
         let asset = AVURLAsset(url: url)
         let playerItem = AVPlayerItem(asset: asset)
         self.player = AVPlayer(playerItem: playerItem)
+        self.isPlaying = false // Reset playback state
 
         Task {
             do {
@@ -204,16 +220,10 @@ class AudioPlayerViewModel: ObservableObject {
                 print("Failed to load duration: \(error)")
             }
         }
+
         addPeriodicTimeObserver()
     }
-
-    deinit {
-        if let token = timeObserverToken {
-            player?.removeTimeObserver(token)
-        }
-        NotificationCenter.default.removeObserver(self)
-    }
-
+    
     private func addPeriodicTimeObserver() {
         guard let player = player else { return }
 
@@ -259,6 +269,7 @@ class AudioPlayerViewModel: ObservableObject {
         let secs = Int(seconds) % 60
         return String(format: "%d:%02d", mins, secs)
     }
+    
 }
 
 
@@ -339,7 +350,7 @@ struct PodcastDetailView: View {
     
     var body: some View {
         List(episodes) { episode in
-            NavigationLink(destination: EpisodePlayerView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)) {
+            NavigationLink(destination: EpisodePreviewView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)) {
                 HStack(alignment: .top, spacing: 10) {
                     if let imageURL = episode.imageURL, let url = URL(string: imageURL) {
                         AsyncImage(url: url) { image in
@@ -349,6 +360,8 @@ struct PodcastDetailView: View {
                         }
                         .frame(width: 60, height: 60)
                         .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.black, lineWidth: 0.5))
                     }
                     
                     VStack(alignment: .leading) {
@@ -397,8 +410,96 @@ struct PodcastDetailView: View {
     }
 }
 
+struct EpisodePreviewView: View {
+    @State private var isShowingPlayer = false
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    
+    let episode: Episode
+    let podcastTitle: String
+    let podcastImageURL: String?
+    
+    var isCurrentlyPlaying: Bool {
+        audioVM.episode?.id == episode.id && audioVM.isPlaying
+    }
+    
+    var body: some View {
+        Group {
+           let _ = isCurrentlyPlaying
+            
+            ScrollView {
+                VStack(spacing: 10) {
+                    if let imageURL = episode.imageURL ?? podcastImageURL,
+                       let url = URL(string: imageURL) {
+                        AsyncImage(url: url) { image in
+                            image.resizable()
+                        } placeholder: {
+                            Color.gray
+                        }
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 300)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .overlay(RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.black, lineWidth: 0.5))
+                        .padding(.top)
+                    }
+                    
+                    Text(episode.title)
+                        .font(.title2)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                    
+                    Text(podcastTitle)
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                    
+                    ZStack {
+                        NavigationLink(
+                            destination: EpisodePlayerView(
+                                episode: episode,
+                                podcastTitle: podcastTitle,
+                                podcastImageURL: podcastImageURL
+                            ),
+                            isActive: $isShowingPlayer
+                        ) {
+                            EmptyView()
+                        }
+                        .hidden()
+                        
+                        Button(action: {
+                            if audioVM.episode?.id == episode.id {
+                                audioVM.togglePlayPause()
+                            } else {
+                                audioVM.load(episode: episode)
+                                audioVM.togglePlayPause()
+                            }
+                            isShowingPlayer = true
+                        }) {
+                            Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
+                                .resizable()
+                                .frame(width: 100, height: 100)
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    if let desc = episode.description {
+                        Text(desc)
+                            .font(.body)
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .navigationTitle("Episode")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
 struct EpisodePlayerView: View {
-    @StateObject private var audioVM: AudioPlayerViewModel
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
 
     let episode: Episode
     let podcastTitle: String
@@ -408,7 +509,7 @@ struct EpisodePlayerView: View {
         ScrollView {
             VStack(spacing: 10) {
                 if let imageURL = episode.imageURL ?? podcastImageURL,
-                    let url = URL(string: imageURL) {
+                   let url = URL(string: imageURL) {
                     AsyncImage(url: url) { image in
                         image.resizable()
                     } placeholder: {
@@ -433,21 +534,24 @@ struct EpisodePlayerView: View {
                     .multilineTextAlignment(.center)
 
                 HStack(spacing: 30) {
-                    Button(action: {audioVM.skipBackward()}) {
+                    Button(action: { audioVM.skipBackward() }) {
                         Image(systemName: "gobackward.15")
                             .font(.title)
                     }
-                    Button(action: {audioVM.togglePlayPause()}) {
+                    Button(action: {
+                        if audioVM.episode?.id != episode.id {
+                                audioVM.load(episode: episode)
+                            }
+                        audioVM.togglePlayPause() }) {
                         Image(systemName: audioVM.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                             .font(.system(size: 100))
                     }
-                    Button(action: {audioVM.skipForward()}) {
+                    Button(action: { audioVM.skipForward() }) {
                         Image(systemName: "goforward.15")
                             .font(.title)
                     }
                 }
-       //       .padding(.vertical)
-                
+
                 VStack(spacing: 12) {
                     HStack {
                         Text(audioVM.formattedTime(audioVM.currentTime))
@@ -476,14 +580,8 @@ struct EpisodePlayerView: View {
         .navigationTitle("Now Playing")
         .navigationBarTitleDisplayMode(.inline)
     }
-    
-    init(episode: Episode, podcastTitle: String, podcastImageURL: String?) {
-        self.episode = episode
-        self.podcastTitle = podcastTitle
-        self.podcastImageURL = podcastImageURL
-        _audioVM = StateObject(wrappedValue: AudioPlayerViewModel(episode: episode))
-    }
 }
+
 
 #Preview {
     ContentView()
