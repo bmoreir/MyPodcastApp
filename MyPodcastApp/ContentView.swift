@@ -26,13 +26,23 @@ struct Podcast: Identifiable, Codable {
 }
 
 struct Episode: Identifiable {
-    let id = UUID()
+    var id: String
     let title: String
     let pubDate: Date?
     let audioURL: String
     let duration: String?
     let imageURL: String?
     let description: String?
+    
+    init(title: String, pubDate: Date?, audioURL: String, duration: String?, imageURL: String?, description: String?) {
+        self.id = audioURL
+        self.title = title
+        self.pubDate = pubDate
+        self.audioURL = audioURL
+        self.duration = duration
+        self.imageURL = imageURL
+        self.description = description
+    }
     
     var durationInMinutes: String? {
         guard let duration = duration else { return nil }
@@ -165,7 +175,8 @@ class RSSParser: NSObject, XMLParserDelegate {
                 audioURL: currentAudioURL,
                 duration: duration.trimmingCharacters(in: .whitespacesAndNewlines),
                 imageURL: imageURL.isEmpty ? nil : imageURL,
-                description: currentDescription.trimmingCharacters(in: .whitespacesAndNewlines)))
+                description: currentDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            ))
             insideItem = false
         }
     }
@@ -182,31 +193,33 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var isPlaying = false
     @Published var currentTime: Double = 0
     @Published var durationTime: Double = 0
-    @Published var currentEpisodeID: UUID? = nil //new
-
+    @Published var currentEpisodeID: String? = nil
+    
+    
     private init() {}
-
+    
     deinit {
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
         }
         NotificationCenter.default.removeObserver(self)
     }
-
+    
     func load(episode: Episode) {
         if self.episode?.audioURL == episode.audioURL {
             return
         }
-
+        
         self.episode = episode
-
+        self.currentEpisodeID = episode.id
+        
         guard let url = URL(string: episode.audioURL) else { return }
-
+        
         let asset = AVURLAsset(url: url)
         let playerItem = AVPlayerItem(asset: asset)
         self.player = AVPlayer(playerItem: playerItem)
-        self.isPlaying = false // Reset playback state
-
+        self.isPlaying = false
+        
         Task {
             do {
                 let duration = try await asset.load(.duration)
@@ -220,22 +233,22 @@ class AudioPlayerViewModel: ObservableObject {
                 print("Failed to load duration: \(error)")
             }
         }
-
+        
         addPeriodicTimeObserver()
     }
     
     private func addPeriodicTimeObserver() {
         guard let player = player else { return }
-
+        
         let interval = CMTime(seconds: 1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             self?.currentTime = time.seconds
         }
     }
-
+    
     func togglePlayPause() {
         guard let player = player else { return }
-
+        
         if isPlaying {
             player.pause()
             isPlaying = false
@@ -244,25 +257,25 @@ class AudioPlayerViewModel: ObservableObject {
             isPlaying = true
         }
     }
-
+    
     func skipForward(seconds: Double = 15) {
         guard let player = player else { return }
         let current = player.currentTime()
         let newTime = CMTime(seconds: current.seconds + seconds, preferredTimescale: current.timescale)
         player.seek(to: newTime)
     }
-
+    
     func skipBackward(seconds: Double = 15) {
         guard let player = player else { return }
         let current = player.currentTime()
         let newTime = CMTime(seconds: max(current.seconds - seconds, 0), preferredTimescale: current.timescale)
         player.seek(to: newTime)
     }
-
+    
     func seek(to time: CMTime) {
         player?.seek(to: time)
     }
-
+    
     func formattedTime(_ seconds: Double) -> String {
         guard seconds.isFinite && !seconds.isNaN else { return "0:00" }
         let mins = Int(seconds) / 60
@@ -306,7 +319,7 @@ struct SearchView: View {
     
     
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack {
                 TextField("Search podcasts...", text: $searchText, onCommit: {
                     fetcher.search(term: searchText)
@@ -423,88 +436,79 @@ struct EpisodePreviewView: View {
     }
     
     var body: some View {
-        Group {
-           let _ = isCurrentlyPlaying
-            
-            ScrollView {
-                VStack(spacing: 10) {
-                    if let imageURL = episode.imageURL ?? podcastImageURL,
-                       let url = URL(string: imageURL) {
-                        AsyncImage(url: url) { image in
-                            image.resizable()
-                        } placeholder: {
-                            Color.gray
-                        }
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: 300)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-                        .overlay(RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color.black, lineWidth: 0.5))
-                        .padding(.top)
+        ScrollView {
+            VStack(spacing: 10) {
+                if let imageURL = episode.imageURL ?? podcastImageURL,
+                   let url = URL(string: imageURL) {
+                    AsyncImage(url: url) { image in
+                        image.resizable()
+                    } placeholder: {
+                        Color.gray
                     }
-                    
-                    Text(episode.title)
-                        .font(.title2)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                    
-                    Text(podcastTitle)
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
-                        .multilineTextAlignment(.center)
-                    
-                    ZStack {
-                        NavigationLink(
-                            destination: EpisodePlayerView(
-                                episode: episode,
-                                podcastTitle: podcastTitle,
-                                podcastImageURL: podcastImageURL
-                            ),
-                            isActive: $isShowingPlayer
-                        ) {
-                            EmptyView()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.black, lineWidth: 0.5))
+                    .padding(.top)
+                }
+                
+                Text(episode.title)
+                    .font(.title2)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                
+                Text(podcastTitle)
+                    .font(.subheadline)
+                    .foregroundColor(.gray)
+                    .multilineTextAlignment(.center)
+                
+                ZStack {
+                    Button(action: {
+                        if audioVM.episode?.id == episode.id {
+                            audioVM.togglePlayPause()
+                        } else {
+                            audioVM.load(episode: episode)
+                            audioVM.togglePlayPause()
                         }
-                        .hidden()
-                        
-                        Button(action: {
-                            if audioVM.episode?.id == episode.id {
-                                audioVM.togglePlayPause()
-                            } else {
-                                audioVM.load(episode: episode)
-                                audioVM.togglePlayPause()
-                            }
-                            isShowingPlayer = true
-                        }) {
-                            Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
-                                .resizable()
-                                .frame(width: 100, height: 100)
-                                .foregroundColor(.blue)
-                        }
-                    }
-                    
-                    Divider()
-                    
-                    if let desc = episode.description {
-                        Text(desc)
-                            .font(.body)
-                            .padding()
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        isShowingPlayer = true
+                    }) {
+                        Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
+                            .resizable()
+                            .frame(width: 100, height: 100)
+                            .foregroundColor(.blue)
                     }
                 }
+                
+                Divider()
+                
+                if let desc = episode.description {
+                    Text(desc)
+                        .font(.body)
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
-            .navigationTitle("Episode")
-            .navigationBarTitleDisplayMode(.inline)
+        }
+        .navigationTitle("Episode")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $isShowingPlayer) {
+            EpisodePlayerView(
+                episode: episode,
+                podcastTitle: podcastTitle,
+                podcastImageURL: podcastImageURL
+            )
         }
     }
 }
 
 struct EpisodePlayerView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-
+    
     let episode: Episode
     let podcastTitle: String
     let podcastImageURL: String?
-
+    
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
@@ -522,17 +526,17 @@ struct EpisodePlayerView: View {
                         .stroke(Color.black, lineWidth: 0.5))
                     .padding(.top)
                 }
-
+                
                 Text(episode.title)
                     .font(.title2)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
-
+                
                 Text(podcastTitle)
                     .font(.subheadline)
                     .foregroundColor(.gray)
                     .multilineTextAlignment(.center)
-
+                
                 HStack(spacing: 30) {
                     Button(action: { audioVM.skipBackward() }) {
                         Image(systemName: "gobackward.15")
@@ -540,18 +544,18 @@ struct EpisodePlayerView: View {
                     }
                     Button(action: {
                         if audioVM.episode?.id != episode.id {
-                                audioVM.load(episode: episode)
-                            }
+                            audioVM.load(episode: episode)
+                        }
                         audioVM.togglePlayPause() }) {
-                        Image(systemName: audioVM.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 100))
-                    }
+                            Image(systemName: audioVM.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                                .font(.system(size: 100))
+                        }
                     Button(action: { audioVM.skipForward() }) {
                         Image(systemName: "goforward.15")
                             .font(.title)
                     }
                 }
-
+                
                 VStack(spacing: 12) {
                     HStack {
                         Text(audioVM.formattedTime(audioVM.currentTime))
@@ -566,9 +570,9 @@ struct EpisodePlayerView: View {
                     .font(.caption)
                     .padding(.horizontal)
                 }
-
+                
                 Divider()
-
+                
                 if let desc = episode.description {
                     Text(desc)
                         .font(.body)
