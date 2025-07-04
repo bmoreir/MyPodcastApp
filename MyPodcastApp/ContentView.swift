@@ -194,7 +194,8 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var currentTime: Double = 0
     @Published var durationTime: Double = 0
     @Published var currentEpisodeID: String? = nil
-    @Published var isPlayerSheetVisible = false // new
+    @Published var isPlayerSheetVisible: Bool = false
+    @Published var showMiniPlayer: Bool = false
     
     private init() {}
     
@@ -219,6 +220,17 @@ class AudioPlayerViewModel: ObservableObject {
         let playerItem = AVPlayerItem(asset: asset)
         self.player = AVPlayer(playerItem: playerItem)
         self.isPlaying = false
+        
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(playerDidFinishPlaying),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerDidFinishPlaying),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: nil
+        )
         
         Task {
             do {
@@ -255,6 +267,7 @@ class AudioPlayerViewModel: ObservableObject {
         } else {
             player.play()
             isPlaying = true
+            showMiniPlayer = true
         }
     }
     
@@ -283,6 +296,15 @@ class AudioPlayerViewModel: ObservableObject {
         return String(format: "%d:%02d", mins, secs)
     }
     
+    @objc private func playerDidFinishPlaying(notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isPlaying = false
+            self?.currentTime = 0
+            self?.player?.seek(to: .zero)
+            self?.showMiniPlayer = false
+            self?.isPlayerSheetVisible = false
+        }
+    }
 }
 
 
@@ -294,7 +316,8 @@ enum Tab {
 
 struct ContentView: View {
     @State private var selectedTab: Tab = .home
-
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    
     var body: some View {
         ZStack(alignment: .bottom) {
             TabView {
@@ -311,9 +334,15 @@ struct ContentView: View {
                     Label("Settings", systemImage: "gearshape")
                 }
             }
-            MiniPlayerView()
-                .padding(.bottom, 50)
+            /*  MiniPlayerView()
+             .padding(.bottom, 50) */
+            if audioVM.showMiniPlayer {
+                MiniPlayerView()
+                    .transition(.move(edge: .bottom))
+                    .padding(.bottom, 50)
+            }
         }
+        .animation(.easeInOut, value: audioVM.showMiniPlayer) // Optional smooth transition
     }
 }
 
@@ -455,7 +484,19 @@ struct EpisodePreviewView: View {
                         .stroke(Color.black, lineWidth: 0.5))
                     .padding(.top)
                 }
-            
+                HStack(spacing: 8) {
+                    if let pubDate = episode.pubDate {
+                        Text(pubDate.formatted(date: .abbreviated, time: .omitted))
+                    } else {
+                        Text("Date not available")
+                    }
+                    if let duration = episode.durationInMinutes {
+                        Text("• \(duration)")
+                    }
+                }
+                .font(.subheadline)
+                .foregroundColor(.gray)
+                
                 Text(episode.title)
                     .font(.title2)
                     .multilineTextAlignment(.center)
@@ -474,7 +515,7 @@ struct EpisodePreviewView: View {
                             audioVM.load(episode: episode)
                             audioVM.togglePlayPause()
                         }
-                        audioVM.isPlayerSheetVisible = true
+                        audioVM.showMiniPlayer = true
                     }) {
                         Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
                             .resizable()
@@ -541,6 +582,18 @@ struct EpisodePlayerView: View {
                         .stroke(Color.black, lineWidth: 0.5))
                     .padding(.top)
                 }
+                HStack(spacing: 8) {
+                    if let pubDate = episode.pubDate {
+                        Text(pubDate.formatted(date: .abbreviated, time: .omitted))
+                    } else {
+                        Text("Date not available")
+                    }
+                    if let duration = episode.durationInMinutes {
+                        Text("• \(duration)")
+                    }
+                }
+                .font(.subheadline)
+                .foregroundColor(.gray)
                 
                 Text(episode.title)
                     .font(.title2)
@@ -580,7 +633,7 @@ struct EpisodePlayerView: View {
                                 audioVM.seek(to: newTime)
                             }
                         })
-                        Text(audioVM.formattedTime(audioVM.durationTime))
+                        Text(audioVM.formattedTime(audioVM.durationTime - audioVM.currentTime))
                     }
                     .font(.caption)
                     .padding(.horizontal)
