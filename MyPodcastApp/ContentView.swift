@@ -194,7 +194,7 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var currentTime: Double = 0
     @Published var durationTime: Double = 0
     @Published var currentEpisodeID: String? = nil
-    
+    @Published var isPlayerSheetVisible = false // new
     
     private init() {}
     
@@ -294,21 +294,25 @@ enum Tab {
 
 struct ContentView: View {
     @State private var selectedTab: Tab = .home
-    
+
     var body: some View {
-        TabView {
-            Text("Home").tabItem {
-                Label("Home", systemImage: "house")
+        ZStack(alignment: .bottom) {
+            TabView {
+                Text("Home").tabItem {
+                    Label("Home", systemImage: "house")
+                }
+                SearchView().tabItem {
+                    Label("Search", systemImage: "magnifyingglass")
+                }
+                Text("Library").tabItem {
+                    Label("Library", systemImage: "book.fill")
+                }
+                Text("Settings").tabItem {
+                    Label("Settings", systemImage: "gearshape")
+                }
             }
-            SearchView().tabItem {
-                Label("Search", systemImage: "magnifyingglass")
-            }
-            Text("Library").tabItem {
-                Label("Library", systemImage: "book.fill")
-            }
-            Text("Settings").tabItem {
-                Label("Settings", systemImage: "gearshape")
-            }
+            MiniPlayerView()
+                .padding(.bottom, 50)
         }
     }
 }
@@ -424,7 +428,6 @@ struct PodcastDetailView: View {
 }
 
 struct EpisodePreviewView: View {
-    @State private var isShowingPlayer = false
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     
     let episode: Episode
@@ -452,7 +455,7 @@ struct EpisodePreviewView: View {
                         .stroke(Color.black, lineWidth: 0.5))
                     .padding(.top)
                 }
-                
+            
                 Text(episode.title)
                     .font(.title2)
                     .multilineTextAlignment(.center)
@@ -471,7 +474,7 @@ struct EpisodePreviewView: View {
                             audioVM.load(episode: episode)
                             audioVM.togglePlayPause()
                         }
-                        isShowingPlayer = true
+                        audioVM.isPlayerSheetVisible = true
                     }) {
                         Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
                             .resizable()
@@ -492,7 +495,7 @@ struct EpisodePreviewView: View {
         }
         .navigationTitle("Episode")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $isShowingPlayer) {
+        .sheet(isPresented: $audioVM.isPlayerSheetVisible) {
             EpisodePlayerView(
                 episode: episode,
                 podcastTitle: podcastTitle,
@@ -510,6 +513,18 @@ struct EpisodePlayerView: View {
     let podcastImageURL: String?
     
     var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                Button(action: {
+                    audioVM.isPlayerSheetVisible = false
+                }) {
+                    Image(systemName: "chevron.down")
+                        .font(.title2)
+                        .padding()
+                }
+            }
+        }
         ScrollView {
             VStack(spacing: 10) {
                 if let imageURL = episode.imageURL ?? podcastImageURL,
@@ -586,6 +601,45 @@ struct EpisodePlayerView: View {
     }
 }
 
+struct MiniPlayerView: View {
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    
+    var body: some View {
+        if let episode = audioVM.episode {
+            HStack {
+                if let url = URL(string: episode.imageURL ?? "") {
+                    AsyncImage(url: url) { image in
+                        image.resizable()
+                    } placeholder: {
+                        Color.gray
+                    }
+                    .frame(width: 40, height: 40)
+                    .cornerRadius(8)
+                }
+                
+                VStack(alignment: .leading) {
+                    Text(episode.title)
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    audioVM.togglePlayPause()
+                }) {
+                    Image(systemName: audioVM.isPlaying ? "pause.fill" : "play.fill")
+                        .foregroundColor(.primary)
+                }
+            }
+            .padding()
+            .background(.ultraThinMaterial)
+            .onTapGesture {
+                audioVM.isPlayerSheetVisible = true
+            }
+        }
+    }
+}
 
 #Preview {
     ContentView()
