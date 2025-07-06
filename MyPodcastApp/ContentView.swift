@@ -11,7 +11,7 @@ import AVFoundation
 import Combine
 
 
-//MARK - Models
+//MARK: - Models
 
 struct Podcast: Identifiable, Codable {
     let id = UUID()
@@ -78,7 +78,7 @@ struct SearchResults: Decodable {
 }
 
 
-//MARK - ViewModels
+//MARK: - ViewModels
 
 @MainActor
 class PodcastSearchViewModel: ObservableObject {
@@ -308,7 +308,7 @@ class AudioPlayerViewModel: ObservableObject {
 }
 
 
-//MARK - Views
+//MARK: - Views
 
 enum Tab {
     case home, search, library, settings
@@ -393,60 +393,101 @@ struct SearchView: View {
 struct PodcastDetailView: View {
     let podcast: Podcast
     @State private var episodes: [Episode] = []
-    
+
     var body: some View {
-        List(episodes) { episode in
-            NavigationLink(destination: EpisodePreviewView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)) {
-                HStack(alignment: .top, spacing: 10) {
-                    if let imageURL = episode.imageURL, let url = URL(string: imageURL) {
-                        AsyncImage(url: url) { image in
-                            image.resizable().scaledToFill()
+        List {
+            Section {
+                VStack(spacing: 12) {
+                    if let imageUrl = URL(string: podcast.artworkUrl600) {
+                        AsyncImage(url: imageUrl) { image in
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 200)
+                                .cornerRadius(16)
+                                .shadow(radius: 6)
                         } placeholder: {
                             Color.gray.opacity(0.3)
+                                .frame(width: 200, height: 200)
+                                .cornerRadius(16)
                         }
-                        .frame(width: 60, height: 60)
-                        .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.black, lineWidth: 0.5))
                     }
+
+                    Text(podcast.collectionName)
+                        .font(.title)
+                        .fontWeight(.semibold)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
                     
-                    VStack(alignment: .leading) {
-                        Text(episode.title)
-                            .font(.headline)
-                        HStack(spacing: 8) {
-                            if let pubDate = episode.pubDate {
-                                Text(pubDate.formatted(date: .abbreviated, time: .omitted))
-                            } else {
-                                Text("Date not available")
-                            }
-                            if let duration = episode.durationInMinutes {
-                                Text("• \(duration)")
-                            }
-                        }
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
-                    }
+                    Text("\(episodes.count) episodes")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                    
+                    Divider()
+                        .padding(.top, 4)
                 }
-                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity)
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+            }
+
+            ForEach(episodes) { episode in
+                NavigationLink(destination: EpisodePreviewView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)) {
+                    HStack(alignment: .top, spacing: 10) {
+                        if let imageURL = episode.imageURL, let url = URL(string: imageURL) {
+                            AsyncImage(url: url) { image in
+                                image.resizable().scaledToFill()
+                            } placeholder: {
+                                Color.gray.opacity(0.3)
+                            }
+                            .frame(width: 60, height: 60)
+                            .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.black.opacity(0.2), lineWidth: 0.5))
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(episode.title)
+                                .font(.headline)
+
+                            HStack(spacing: 8) {
+                                if let pubDate = episode.pubDate {
+                                    Text(pubDate.formatted(date: .abbreviated, time: .omitted))
+                                } else {
+                                    Text("Date not available")
+                                }
+
+                                if let duration = episode.durationInMinutes {
+                                    Text("• \(duration)")
+                                }
+                            }
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
             }
         }
+        .listStyle(.plain)
         .navigationTitle(podcast.collectionName)
+        .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             if let feedUrl = podcast.feedUrl {
                 fetchEpisodes(from: feedUrl)
             }
         }
     }
-    
+
     func fetchEpisodes(from feedUrl: String) {
         guard let url = URL(string: feedUrl) else { return }
-        
+
         URLSession.shared.dataTask(with: url) { data, _, error in
             guard let data = data else {
                 print("Error fetching data: \(error?.localizedDescription ?? "Unknown error")")
                 return
             }
-            
+
             let parser = RSSParser()
             let result = parser.parse(data: data)
             DispatchQueue.main.async {
