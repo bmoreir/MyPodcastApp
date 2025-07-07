@@ -196,6 +196,8 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var currentEpisodeID: String? = nil
     @Published var isPlayerSheetVisible: Bool = false
     @Published var showMiniPlayer: Bool = false
+    @Published var podcastImageURL: String? //new
+
     
     private init() {}
     
@@ -206,13 +208,15 @@ class AudioPlayerViewModel: ObservableObject {
         NotificationCenter.default.removeObserver(self)
     }
     
-    func load(episode: Episode) {
+    func load(episode: Episode, podcastImageURL: String? = nil) {
         if self.episode?.audioURL == episode.audioURL {
             return
         }
         
         self.episode = episode
         self.currentEpisodeID = episode.id
+        self.podcastImageURL = podcastImageURL // ✅ Required line
+
         
         guard let url = URL(string: episode.audioURL) else { return }
         
@@ -313,7 +317,7 @@ class AudioPlayerViewModel: ObservableObject {
 enum Tab {
     case home, search, library, settings
 }
-
+//MARK: - ContentView
 struct ContentView: View {
     @State private var selectedTab: Tab = .home
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
@@ -390,6 +394,7 @@ struct SearchView: View {
     }
 }
 
+//MARK: - PodcastDetailView
 struct PodcastDetailView: View {
     let podcast: Podcast
     @State private var episodes: [Episode] = []
@@ -497,6 +502,7 @@ struct PodcastDetailView: View {
     }
 }
 
+//MARK: - EpisodePreviewView
 struct EpisodePreviewView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     
@@ -553,9 +559,15 @@ struct EpisodePreviewView: View {
                         if audioVM.episode?.id == episode.id {
                             audioVM.togglePlayPause()
                         } else {
-                            audioVM.load(episode: episode)
+                            audioVM.load(episode: episode, podcastImageURL: podcastImageURL)
                             audioVM.togglePlayPause()
                         }
+                     /*   if audioVM.episode?.id == episode.id {
+                            audioVM.togglePlayPause()
+                        } else {
+                            audioVM.load(episode: episode)
+                            audioVM.togglePlayPause()
+                        } */
                         audioVM.showMiniPlayer = true
                     }) {
                         Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
@@ -587,6 +599,7 @@ struct EpisodePreviewView: View {
     }
 }
 
+//MARK: - EpisodePlayerView
 struct EpisodePlayerView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     
@@ -695,6 +708,69 @@ struct EpisodePlayerView: View {
     }
 }
 
+//MARK: - MiniPlayerView
+struct MiniPlayerView: View {
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    
+    var body: some View {
+        if audioVM.episode != nil {
+            HStack(spacing: 16) {
+                // Podcast artwork
+                if let url = URL(string: audioVM.podcastImageURL ?? "") {
+                    AsyncImage(url: url) { image in
+                        image.resizable()
+                    } placeholder: {
+                        Color.gray
+                    }
+                    .frame(width: 40, height: 40)
+                    .cornerRadius(8)
+                    .frame(width: 40, height: 40)
+                    .cornerRadius(8)
+                }
+
+                Spacer()
+                
+                // Playback controls
+                HStack(spacing: 24) {
+                    // Skip backward icon
+                    Button(action: {
+                        audioVM.skipBackward()
+                    }) {
+                        Image(systemName: "gobackward")
+                            .foregroundColor(.primary)
+                    }
+
+                    // Play/Pause button
+                    Button(action: {
+                        audioVM.togglePlayPause()
+                    }) {
+                        Image(systemName: audioVM.isPlaying ? "pause.fill" : "play.fill")
+                            .foregroundColor(.primary)
+                            .font(.title2)
+                    }
+
+                    // Skip forward icon
+                    Button(action: {
+                        audioVM.skipForward()
+                    }) {
+                        Image(systemName: "goforward")
+                            .foregroundColor(.primary)
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial)
+            .onTapGesture {
+                audioVM.isPlayerSheetVisible = true
+            }
+        }
+    }
+}
+
+/*
 struct MiniPlayerView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     
@@ -734,7 +810,7 @@ struct MiniPlayerView: View {
         }
     }
 }
-
+*/
 #Preview {
     ContentView()
 }
