@@ -110,6 +110,7 @@ class PodcastSearchViewModel: ObservableObject {
     
 }
 
+//MARK: - RSSParser
 class RSSParser: NSObject, XMLParserDelegate {
     var episodes: [Episode] = []
     var currentElement = ""
@@ -182,7 +183,7 @@ class RSSParser: NSObject, XMLParserDelegate {
     }
 }
 
-
+//MARK: - AudioPlayerViewModel
 class AudioPlayerViewModel: ObservableObject {
     static let shared = AudioPlayerViewModel()
     
@@ -311,16 +312,54 @@ class AudioPlayerViewModel: ObservableObject {
     }
 }
 
+//MARK: - LibraryViewModel
+class LibraryViewModel: ObservableObject {
+    @Published var subscriptions: [Podcast] = []
+    
+    private let subscriptionsKey = "subscribedPodcasts"
+
+    init() {
+        loadSubscriptions()
+    }
+
+    func subscribe(to podcast: Podcast) {
+        if !subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
+            subscriptions.append(podcast)
+            saveSubscriptions()
+        }
+    }
+
+    func unsubscribe(from podcast: Podcast) {
+        subscriptions.removeAll { $0.collectionName == podcast.collectionName }
+        saveSubscriptions()
+    }
+
+    private func saveSubscriptions() {
+        if let data = try? JSONEncoder().encode(subscriptions) {
+            UserDefaults.standard.set(data, forKey: subscriptionsKey)
+        }
+    }
+
+    private func loadSubscriptions() {
+        if let data = UserDefaults.standard.data(forKey: subscriptionsKey),
+           let decoded = try? JSONDecoder().decode([Podcast].self, from: data) {
+            subscriptions = decoded
+        }
+    }
+}
+
 
 //MARK: - Views
 
 enum Tab {
     case home, search, library, settings
 }
+
 //MARK: - ContentView
 struct ContentView: View {
     @State private var selectedTab: Tab = .home
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    @StateObject private var libraryVM = LibraryViewModel()
     
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -331,25 +370,25 @@ struct ContentView: View {
                 SearchView().tabItem {
                     Label("Search", systemImage: "magnifyingglass")
                 }
-                Text("Library").tabItem {
+                LibraryView().tabItem {
                     Label("Library", systemImage: "book.fill")
                 }
                 Text("Settings").tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
             }
-            /*  MiniPlayerView()
-             .padding(.bottom, 50) */
             if audioVM.showMiniPlayer {
                 MiniPlayerView()
                     .transition(.move(edge: .bottom))
                     .padding(.bottom, 50)
             }
         }
-        .animation(.easeInOut, value: audioVM.showMiniPlayer) // Optional smooth transition
+        .environmentObject(libraryVM)
+        .animation(.easeInOut, value: audioVM.showMiniPlayer)
     }
 }
 
+//MARK: - SearchView
 struct SearchView: View {
     @StateObject var fetcher = PodcastSearchViewModel()
     @State private var searchText: String = ""
@@ -398,6 +437,7 @@ struct SearchView: View {
 struct PodcastDetailView: View {
     let podcast: Podcast
     @State private var episodes: [Episode] = []
+    @EnvironmentObject var libraryVM: LibraryViewModel
 
     var body: some View {
         List {
@@ -427,6 +467,21 @@ struct PodcastDetailView: View {
                     Text("\(episodes.count) episodes")
                             .font(.subheadline)
                             .foregroundColor(.gray)
+                    
+                    Button(action: {
+                            if libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
+                                libraryVM.unsubscribe(from: podcast)
+                            } else {
+                                libraryVM.subscribe(to: podcast)
+                            }
+                        }) {
+                            Text(libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) ? "Unsubscribe" : "Subscribe")
+                                .font(.subheadline)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.blue.opacity(0.1))
+                                .cornerRadius(8)
+                        }
                     
                     Divider()
                         .padding(.top, 4)
@@ -562,12 +617,6 @@ struct EpisodePreviewView: View {
                             audioVM.load(episode: episode, podcastImageURL: podcastImageURL)
                             audioVM.togglePlayPause()
                         }
-                     /*   if audioVM.episode?.id == episode.id {
-                            audioVM.togglePlayPause()
-                        } else {
-                            audioVM.load(episode: episode)
-                            audioVM.togglePlayPause()
-                        } */
                         audioVM.showMiniPlayer = true
                     }) {
                         Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
@@ -715,7 +764,6 @@ struct MiniPlayerView: View {
     var body: some View {
         if audioVM.episode != nil {
             HStack(spacing: 16) {
-                // Podcast artwork
                 if let url = URL(string: audioVM.podcastImageURL ?? "") {
                     AsyncImage(url: url) { image in
                         image.resizable()
@@ -730,9 +778,7 @@ struct MiniPlayerView: View {
 
                 Spacer()
                 
-                // Playback controls
                 HStack(spacing: 24) {
-                    // Skip backward icon
                     Button(action: {
                         audioVM.skipBackward()
                     }) {
@@ -740,7 +786,6 @@ struct MiniPlayerView: View {
                             .foregroundColor(.primary)
                     }
 
-                    // Play/Pause button
                     Button(action: {
                         audioVM.togglePlayPause()
                     }) {
@@ -749,7 +794,6 @@ struct MiniPlayerView: View {
                             .font(.title2)
                     }
 
-                    // Skip forward icon
                     Button(action: {
                         audioVM.skipForward()
                     }) {
@@ -770,47 +814,38 @@ struct MiniPlayerView: View {
     }
 }
 
-/*
-struct MiniPlayerView: View {
-    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-    
+//MARK: - LibraryView
+struct LibraryView: View {
+    @EnvironmentObject var libraryVM: LibraryViewModel
+
     var body: some View {
-        if let episode = audioVM.episode {
-            HStack {
-                if let url = URL(string: episode.imageURL ?? "") {
-                    AsyncImage(url: url) { image in
-                        image.resizable()
-                    } placeholder: {
-                        Color.gray
+        NavigationStack {
+            List(libraryVM.subscriptions) { podcast in
+                NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
+                    HStack {
+                        AsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
+                            image.resizable()
+                        } placeholder: {
+                            Color.gray
+                        }
+                        .frame(width: 60, height: 60)
+                        .cornerRadius(8)
+
+                        VStack(alignment: .leading) {
+                            Text(podcast.collectionName)
+                                .font(.headline)
+                            Text(podcast.artistName)
+                                .font(.subheadline)
+                                .foregroundColor(.gray)
+                        }
                     }
-                    .frame(width: 40, height: 40)
-                    .cornerRadius(8)
-                }
-                
-                VStack(alignment: .leading) {
-                    Text(episode.title)
-                        .font(.caption)
-                        .lineLimit(1)
-                }
-                
-                Spacer()
-                
-                Button(action: {
-                    audioVM.togglePlayPause()
-                }) {
-                    Image(systemName: audioVM.isPlaying ? "pause.fill" : "play.fill")
-                        .foregroundColor(.primary)
                 }
             }
-            .padding()
-            .background(.ultraThinMaterial)
-            .onTapGesture {
-                audioVM.isPlayerSheetVisible = true
-            }
+            .navigationTitle("Library")
         }
     }
 }
-*/
+
 #Preview {
     ContentView()
 }
