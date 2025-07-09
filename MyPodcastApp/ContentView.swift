@@ -184,6 +184,7 @@ class RSSParser: NSObject, XMLParserDelegate {
 }
 
 //MARK: - AudioPlayerViewModel
+@MainActor
 class AudioPlayerViewModel: ObservableObject {
     static let shared = AudioPlayerViewModel()
     
@@ -197,75 +198,70 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var currentEpisodeID: String? = nil
     @Published var isPlayerSheetVisible: Bool = false
     @Published var showMiniPlayer: Bool = false
-    @Published var podcastImageURL: String? //new
+    @Published var podcastImageURL: String?
 
-    
     private init() {}
-    
+
     deinit {
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
         }
         NotificationCenter.default.removeObserver(self)
     }
-    
+
     func load(episode: Episode, podcastImageURL: String? = nil) {
-        if self.episode?.audioURL == episode.audioURL {
-            return
-        }
-        
+        if self.episode?.audioURL == episode.audioURL { return }
+
         self.episode = episode
         self.currentEpisodeID = episode.id
-        self.podcastImageURL = podcastImageURL // ✅ Required line
+        self.podcastImageURL = podcastImageURL
 
-        
         guard let url = URL(string: episode.audioURL) else { return }
-        
+
         let asset = AVURLAsset(url: url)
         let playerItem = AVPlayerItem(asset: asset)
         self.player = AVPlayer(playerItem: playerItem)
         self.isPlaying = false
-        
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(playerDidFinishPlaying),
-            name: .AVPlayerItemDidPlayToEndTime,
-            object: playerItem)
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(playerDidFinishPlaying),
             name: .AVPlayerItemDidPlayToEndTime,
-            object: nil
+            object: playerItem
         )
-        
+
         Task {
             do {
                 let duration = try await asset.load(.duration)
                 let seconds = CMTimeGetSeconds(duration)
                 if seconds.isFinite {
-                    await MainActor.run {
-                        self.durationTime = seconds
-                    }
+                    self.durationTime = seconds
                 }
             } catch {
                 print("Failed to load duration: \(error)")
             }
         }
-        
+
         addPeriodicTimeObserver()
     }
-    
+
+    @MainActor
     private func addPeriodicTimeObserver() {
         guard let player = player else { return }
-        
+
         let interval = CMTime(seconds: 1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            self?.currentTime = time.seconds
+            guard let self = self else { return }
+            
+            Task { @MainActor in
+                self.currentTime = time.seconds
+            }
         }
     }
-    
+
     func togglePlayPause() {
         guard let player = player else { return }
-        
+
         if isPlaying {
             player.pause()
             isPlaying = false
@@ -275,44 +271,46 @@ class AudioPlayerViewModel: ObservableObject {
             showMiniPlayer = true
         }
     }
-    
+
     func skipForward(seconds: Double = 15) {
         guard let player = player else { return }
         let current = player.currentTime()
         let newTime = CMTime(seconds: current.seconds + seconds, preferredTimescale: current.timescale)
         player.seek(to: newTime)
     }
-    
+
     func skipBackward(seconds: Double = 15) {
         guard let player = player else { return }
         let current = player.currentTime()
         let newTime = CMTime(seconds: max(current.seconds - seconds, 0), preferredTimescale: current.timescale)
         player.seek(to: newTime)
     }
-    
+
     func seek(to time: CMTime) {
         player?.seek(to: time)
     }
-    
+
     func formattedTime(_ seconds: Double) -> String {
         guard seconds.isFinite && !seconds.isNaN else { return "0:00" }
         let mins = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return String(format: "%d:%02d", mins, secs)
     }
-    
+
     @objc private func playerDidFinishPlaying(notification: Notification) {
-        DispatchQueue.main.async { [weak self] in
-            self?.isPlaying = false
-            self?.currentTime = 0
-            self?.player?.seek(to: .zero)
-            self?.showMiniPlayer = false
-            self?.isPlayerSheetVisible = false
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.isPlaying = false
+            self.currentTime = 0
+            self.player?.seek(to: .zero)
+            self.showMiniPlayer = false
+            self.isPlayerSheetVisible = false
         }
     }
 }
 
 //MARK: - LibraryViewModel
+@MainActor
 class LibraryViewModel: ObservableObject {
     @Published var subscriptions: [Podcast] = []
     
@@ -376,15 +374,18 @@ struct ContentView: View {
                 Text("Settings").tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
+                Text("Queue").tabItem {
+                    Label("Queue", systemImage: "music.note.list")
+                }
             }
             if audioVM.showMiniPlayer {
                 MiniPlayerView()
                     .transition(.move(edge: .bottom))
-                    .padding(.bottom, 50)
+                    .padding(.bottom, 49)
             }
         }
         .environmentObject(libraryVM)
-        .animation(.easeInOut, value: audioVM.showMiniPlayer)
+//      .animation(.easeInOut, value: audioVM.showMiniPlayer)
     }
 }
 
@@ -760,23 +761,27 @@ struct EpisodePlayerView: View {
 //MARK: - MiniPlayerView
 struct MiniPlayerView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-    
+
     var body: some View {
         if audioVM.episode != nil {
-            HStack(spacing: 16) {
-                if let url = URL(string: audioVM.podcastImageURL ?? "") {
-                    AsyncImage(url: url) { image in
-                        image.resizable()
-                    } placeholder: {
-                        Color.gray
+            ZStack {
+                HStack {
+                    if let url = URL(string: audioVM.podcastImageURL ?? "") {
+                        AsyncImage(url: url) { image in
+                            image.resizable()
+                        } placeholder: {
+                            Color.gray
+                        }
+                        .frame(width: 40, height: 40)
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.black, lineWidth: 0.5)
+                        )
                     }
-                    .frame(width: 40, height: 40)
-                    .cornerRadius(8)
-                    .frame(width: 40, height: 40)
-                    .cornerRadius(8)
+                    
+                    Spacer()
                 }
-
-                Spacer()
                 
                 HStack(spacing: 24) {
                     Button(action: {
@@ -791,7 +796,7 @@ struct MiniPlayerView: View {
                     }) {
                         Image(systemName: audioVM.isPlaying ? "pause.fill" : "play.fill")
                             .foregroundColor(.primary)
-                            .font(.title2)
+                            .font(.title)
                     }
 
                     Button(action: {
@@ -801,8 +806,6 @@ struct MiniPlayerView: View {
                             .foregroundColor(.primary)
                     }
                 }
-
-                Spacer()
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
@@ -830,6 +833,10 @@ struct LibraryView: View {
                         }
                         .frame(width: 60, height: 60)
                         .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.black, lineWidth: 0.5)
+                        )
 
                         VStack(alignment: .leading) {
                             Text(podcast.collectionName)
