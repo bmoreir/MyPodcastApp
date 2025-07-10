@@ -187,6 +187,7 @@ class RSSParser: NSObject, XMLParserDelegate {
 @MainActor
 class AudioPlayerViewModel: ObservableObject {
     static let shared = AudioPlayerViewModel()
+    private let elapsedTimesKey = "episodeElapsedTimes" //new
     
     private var timeObserverToken: Any?
     private var player: AVPlayer?
@@ -199,8 +200,14 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var isPlayerSheetVisible: Bool = false
     @Published var showMiniPlayer: Bool = false
     @Published var podcastImageURL: String?
+    @Published private(set) var elapsedTimes: [String: Double] = [:] // key: audioURL
 
-    private init() {}
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: elapsedTimesKey),
+               let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
+                self.elapsedTimes = saved
+            }
+    }
 
     deinit {
         if let token = timeObserverToken {
@@ -243,6 +250,11 @@ class AudioPlayerViewModel: ObservableObject {
         }
 
         addPeriodicTimeObserver()
+        
+        if let savedTime = elapsedTimes[episode.audioURL], savedTime > 0 {
+            let cmTime = CMTime(seconds: savedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+            player?.seek(to: cmTime)
+        }
     }
 
     @MainActor
@@ -265,6 +277,7 @@ class AudioPlayerViewModel: ObservableObject {
         if isPlaying {
             player.pause()
             isPlaying = false
+            savePlaybackProgress() //new
         } else {
             player.play()
             isPlaying = true
@@ -305,6 +318,18 @@ class AudioPlayerViewModel: ObservableObject {
             self.player?.seek(to: .zero)
             self.showMiniPlayer = false
             self.isPlayerSheetVisible = false
+        }
+    }
+    private func saveElapsedTimes() {
+        if let data = try? JSONEncoder().encode(elapsedTimes) {
+            UserDefaults.standard.set(data, forKey: elapsedTimesKey)
+        }
+    }
+
+    private func savePlaybackProgress() {
+        if let current = self.episode {
+            elapsedTimes[current.audioURL] = currentTime
+            saveElapsedTimes()
         }
     }
 }
