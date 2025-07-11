@@ -200,7 +200,8 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var isPlayerSheetVisible: Bool = false
     @Published var showMiniPlayer: Bool = false
     @Published var podcastImageURL: String?
-    @Published private(set) var elapsedTimes: [String: Double] = [:] // key: audioURL
+    @Published var episodeQueue: [Episode] = []
+    @Published private(set) var elapsedTimes: [String: Double] = [:]
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: elapsedTimesKey),
@@ -309,7 +310,37 @@ class AudioPlayerViewModel: ObservableObject {
         let secs = Int(seconds) % 60
         return String(format: "%d:%02d", mins, secs)
     }
+    
+    @objc private func playerDidFinishPlaying(notification: Notification) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
 
+            self.isPlaying = false
+            self.currentTime = 0
+            self.showMiniPlayer = false
+            self.isPlayerSheetVisible = false
+
+            if !episodeQueue.isEmpty {
+                let nextEpisode = episodeQueue.removeFirst()
+                self.load(episode: nextEpisode, podcastImageURL: self.podcastImageURL)
+                self.play()
+            } else {
+                self.player?.seek(to: .zero)
+            }
+        }
+    }
+
+    func addToQueue(_ episode: Episode) {
+        episodeQueue.append(episode)
+    }
+
+    func play() {
+        player?.play()
+        isPlaying = true
+        showMiniPlayer = true
+    }
+
+/*
     @objc private func playerDidFinishPlaying(notification: Notification) {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -320,6 +351,7 @@ class AudioPlayerViewModel: ObservableObject {
             self.isPlayerSheetVisible = false
         }
     }
+ */
     private func saveElapsedTimes() {
         if let data = try? JSONEncoder().encode(elapsedTimes) {
             UserDefaults.standard.set(data, forKey: elapsedTimesKey)
@@ -399,7 +431,7 @@ struct ContentView: View {
                 Text("Settings").tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
-                Text("Queue").tabItem {
+                QueueView().tabItem {
                     Label("Queue", systemImage: "music.note.list")
                 }
             }
@@ -652,6 +684,12 @@ struct EpisodePreviewView: View {
                     }
                 }
                 
+                Button(action: {
+                    AudioPlayerViewModel.shared.addToQueue(episode)
+                }){
+                    Label("Add to Queue", systemImage: "music.note.list")
+                }
+                
                 Divider()
                 
                 if let desc = episode.description {
@@ -878,6 +916,99 @@ struct LibraryView: View {
     }
 }
 
+struct QueueView: View {
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+
+    var body: some View {
+        NavigationStack {
+            VStack {
+                if audioVM.episodeQueue.isEmpty {
+                    VStack {
+                        Spacer()
+                        Image(systemName: "music.note.list")
+                            .font(.system(size: 50))
+                            .foregroundColor(.gray)
+                            .padding(.bottom, 10)
+                        Text("Add podcasts to your queue")
+                            .font(.title3)
+                            .foregroundColor(.gray)
+                        Spacer()
+                    }
+                    .multilineTextAlignment(.center)
+                    .padding()
+                } else {
+                    List(audioVM.episodeQueue) { episode in
+                        HStack(spacing: 12) {
+                            AsyncImage(url: URL(string: episode.imageURL ?? "")) { phase in
+                                switch phase {
+                                case .empty:
+                                    Color.gray
+                                        .frame(width: 60, height: 60)
+                                        .cornerRadius(8)
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 60, height: 60)
+                                        .cornerRadius(8)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8)
+                                                .stroke(Color.black, lineWidth: 1.5)
+                                        )
+                                case .failure:
+                                    Color.gray
+                                        .frame(width: 60, height: 60)
+                                        .cornerRadius(8)
+                                @unknown default:
+                                    EmptyView()
+                                }
+                            }
+
+                            Text(episode.title)
+                                .font(.headline)
+                                .lineLimit(2)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("Queue")
+        }
+    }
+}
+
+/*
+struct QueueView: View {
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+
+    var body: some View {
+        VStack {
+            if audioVM.episodeQueue.isEmpty {
+                VStack {
+                    Spacer()
+                    Image(systemName: "music.note.list")
+                        .font(.system(size: 50))
+                        .foregroundColor(.gray)
+                        .padding(.bottom, 10)
+                    Text("Add podcasts to your queue")
+                        .font(.title3)
+                        .foregroundColor(.gray)
+                    Spacer()
+                }
+                .multilineTextAlignment(.center)
+                .padding()
+            } else {
+                List(audioVM.episodeQueue) { episode in
+                    Text(episode.title)
+                }
+                .listStyle(.plain)
+                .navigationTitle("Up Next")
+            }
+        }
+    }
+}
+*/
 #Preview {
     ContentView()
 }
