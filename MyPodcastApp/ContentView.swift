@@ -32,16 +32,20 @@ struct Episode: Identifiable {
     let audioURL: String
     let duration: String?
     let imageURL: String?
+    let podcastImageURL: String?
     let description: String?
+    let podcastName: String?
     
-    init(title: String, pubDate: Date?, audioURL: String, duration: String?, imageURL: String?, description: String?) {
+    init(title: String, pubDate: Date?, audioURL: String, duration: String?, imageURL: String?, podcastImageURL: String?, description: String?, podcastName: String?) {
         self.id = audioURL
         self.title = title
         self.pubDate = pubDate
         self.audioURL = audioURL
         self.duration = duration
         self.imageURL = imageURL
+        self.podcastImageURL = podcastImageURL
         self.description = description
+        self.podcastName = podcastName
     }
     
     var durationInMinutes: String? {
@@ -121,6 +125,8 @@ class RSSParser: NSObject, XMLParserDelegate {
     var imageURL = ""
     var currentDescription = ""
     var insideItem = false
+    var podcastImageURL = ""
+    var podcastName = ""
     
     func parse(data: Data) -> [Episode] {
         let parser = XMLParser(data: data)
@@ -146,6 +152,9 @@ class RSSParser: NSObject, XMLParserDelegate {
         if elementName == "itunes:image", let href = attributeDict["href"] {
             imageURL = href
         }
+        if !insideItem && elementName == "itunes:image", let href = attributeDict["href"] {
+            podcastImageURL = href
+        }
     }
     
     func parser(_ parser: XMLParser, foundCharacters string: String) {
@@ -160,6 +169,9 @@ class RSSParser: NSObject, XMLParserDelegate {
         }
         if currentElement == "description" {
             currentDescription += string
+        }
+        if !insideItem && currentElement == "title" {
+            podcastName += string
         }
     }
     
@@ -176,7 +188,9 @@ class RSSParser: NSObject, XMLParserDelegate {
                 audioURL: currentAudioURL,
                 duration: duration.trimmingCharacters(in: .whitespacesAndNewlines),
                 imageURL: imageURL.isEmpty ? nil : imageURL,
-                description: currentDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+                podcastImageURL: podcastImageURL,
+                description: currentDescription.trimmingCharacters(in: .whitespacesAndNewlines),
+                podcastName: podcastName
             ))
             insideItem = false
         }
@@ -187,7 +201,7 @@ class RSSParser: NSObject, XMLParserDelegate {
 @MainActor
 class AudioPlayerViewModel: ObservableObject {
     static let shared = AudioPlayerViewModel()
-    private let elapsedTimesKey = "episodeElapsedTimes" //new
+    private let elapsedTimesKey = "episodeElapsedTimes"
     
     private var timeObserverToken: Any?
     private var player: AVPlayer?
@@ -202,42 +216,42 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var podcastImageURL: String?
     @Published var episodeQueue: [Episode] = []
     @Published private(set) var elapsedTimes: [String: Double] = [:]
-
+    
     private init() {
         if let data = UserDefaults.standard.data(forKey: elapsedTimesKey),
-               let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
-                self.elapsedTimes = saved
-            }
+           let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
+            self.elapsedTimes = saved
+        }
     }
-
+    
     deinit {
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
         }
         NotificationCenter.default.removeObserver(self)
     }
-
+    
     func load(episode: Episode, podcastImageURL: String? = nil) {
         if self.episode?.audioURL == episode.audioURL { return }
-
+        
         self.episode = episode
         self.currentEpisodeID = episode.id
         self.podcastImageURL = podcastImageURL
-
+        
         guard let url = URL(string: episode.audioURL) else { return }
-
+        
         let asset = AVURLAsset(url: url)
         let playerItem = AVPlayerItem(asset: asset)
         self.player = AVPlayer(playerItem: playerItem)
         self.isPlaying = false
-
+        
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(playerDidFinishPlaying),
             name: .AVPlayerItemDidPlayToEndTime,
             object: playerItem
         )
-
+        
         Task {
             do {
                 let duration = try await asset.load(.duration)
@@ -249,7 +263,7 @@ class AudioPlayerViewModel: ObservableObject {
                 print("Failed to load duration: \(error)")
             }
         }
-
+        
         addPeriodicTimeObserver()
         
         if let savedTime = elapsedTimes[episode.audioURL], savedTime > 0 {
@@ -257,11 +271,11 @@ class AudioPlayerViewModel: ObservableObject {
             player?.seek(to: cmTime)
         }
     }
-
+    
     @MainActor
     private func addPeriodicTimeObserver() {
         guard let player = player else { return }
-
+        
         let interval = CMTime(seconds: 1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             guard let self = self else { return }
@@ -271,10 +285,10 @@ class AudioPlayerViewModel: ObservableObject {
             }
         }
     }
-
+    
     func togglePlayPause() {
         guard let player = player else { return }
-
+        
         if isPlaying {
             player.pause()
             isPlaying = false
@@ -285,25 +299,25 @@ class AudioPlayerViewModel: ObservableObject {
             showMiniPlayer = true
         }
     }
-
+    
     func skipForward(seconds: Double = 15) {
         guard let player = player else { return }
         let current = player.currentTime()
         let newTime = CMTime(seconds: current.seconds + seconds, preferredTimescale: current.timescale)
         player.seek(to: newTime)
     }
-
+    
     func skipBackward(seconds: Double = 15) {
         guard let player = player else { return }
         let current = player.currentTime()
         let newTime = CMTime(seconds: max(current.seconds - seconds, 0), preferredTimescale: current.timescale)
         player.seek(to: newTime)
     }
-
+    
     func seek(to time: CMTime) {
         player?.seek(to: time)
     }
-
+    
     func formattedTime(_ seconds: Double) -> String {
         guard seconds.isFinite && !seconds.isNaN else { return "0:00" }
         let mins = Int(seconds) / 60
@@ -314,12 +328,12 @@ class AudioPlayerViewModel: ObservableObject {
     @objc private func playerDidFinishPlaying(notification: Notification) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-
+            
             self.isPlaying = false
             self.currentTime = 0
             self.showMiniPlayer = false
             self.isPlayerSheetVisible = false
-
+            
             if !episodeQueue.isEmpty {
                 let nextEpisode = episodeQueue.removeFirst()
                 self.load(episode: nextEpisode, podcastImageURL: self.podcastImageURL)
@@ -329,35 +343,23 @@ class AudioPlayerViewModel: ObservableObject {
             }
         }
     }
-
+    
     func addToQueue(_ episode: Episode) {
         episodeQueue.append(episode)
     }
-
+    
     func play() {
         player?.play()
         isPlaying = true
         showMiniPlayer = true
     }
-
-/*
-    @objc private func playerDidFinishPlaying(notification: Notification) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.isPlaying = false
-            self.currentTime = 0
-            self.player?.seek(to: .zero)
-            self.showMiniPlayer = false
-            self.isPlayerSheetVisible = false
-        }
-    }
- */
+    
     private func saveElapsedTimes() {
         if let data = try? JSONEncoder().encode(elapsedTimes) {
             UserDefaults.standard.set(data, forKey: elapsedTimesKey)
         }
     }
-
+    
     private func savePlaybackProgress() {
         if let current = self.episode {
             elapsedTimes[current.audioURL] = currentTime
@@ -372,29 +374,29 @@ class LibraryViewModel: ObservableObject {
     @Published var subscriptions: [Podcast] = []
     
     private let subscriptionsKey = "subscribedPodcasts"
-
+    
     init() {
         loadSubscriptions()
     }
-
+    
     func subscribe(to podcast: Podcast) {
         if !subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
             subscriptions.append(podcast)
             saveSubscriptions()
         }
     }
-
+    
     func unsubscribe(from podcast: Podcast) {
         subscriptions.removeAll { $0.collectionName == podcast.collectionName }
         saveSubscriptions()
     }
-
+    
     private func saveSubscriptions() {
         if let data = try? JSONEncoder().encode(subscriptions) {
             UserDefaults.standard.set(data, forKey: subscriptionsKey)
         }
     }
-
+    
     private func loadSubscriptions() {
         if let data = UserDefaults.standard.data(forKey: subscriptionsKey),
            let decoded = try? JSONDecoder().decode([Podcast].self, from: data) {
@@ -432,7 +434,7 @@ struct ContentView: View {
                     Label("Settings", systemImage: "gearshape")
                 }
                 QueueView().tabItem {
-                    Label("Queue", systemImage: "music.note.list")
+                    Label("Queue", systemImage: "text.badge.plus")
                 }
             }
             if audioVM.showMiniPlayer {
@@ -442,7 +444,7 @@ struct ContentView: View {
             }
         }
         .environmentObject(libraryVM)
-//      .animation(.easeInOut, value: audioVM.showMiniPlayer)
+        //      .animation(.easeInOut, value: audioVM.showMiniPlayer)
     }
 }
 
@@ -496,7 +498,7 @@ struct PodcastDetailView: View {
     let podcast: Podcast
     @State private var episodes: [Episode] = []
     @EnvironmentObject var libraryVM: LibraryViewModel
-
+    
     var body: some View {
         List {
             Section {
@@ -515,7 +517,7 @@ struct PodcastDetailView: View {
                                 .cornerRadius(16)
                         }
                     }
-
+                    
                     Text(podcast.collectionName)
                         .font(.title)
                         .fontWeight(.semibold)
@@ -523,23 +525,23 @@ struct PodcastDetailView: View {
                         .padding(.horizontal)
                     
                     Text("\(episodes.count) episodes")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
                     
                     Button(action: {
-                            if libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
-                                libraryVM.unsubscribe(from: podcast)
-                            } else {
-                                libraryVM.subscribe(to: podcast)
-                            }
-                        }) {
-                            Text(libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) ? "Unsubscribe" : "Subscribe")
-                                .font(.subheadline)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(Color.blue.opacity(0.1))
-                                .cornerRadius(8)
+                        if libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
+                            libraryVM.unsubscribe(from: podcast)
+                        } else {
+                            libraryVM.subscribe(to: podcast)
                         }
+                    }) {
+                        Text(libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) ? "Unsubscribe" : "Subscribe")
+                            .font(.subheadline)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue.opacity(0.1))
+                            .cornerRadius(8)
+                    }
                     
                     Divider()
                         .padding(.top, 4)
@@ -548,9 +550,9 @@ struct PodcastDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
             }
-
+            
             ForEach(episodes) { episode in
-                NavigationLink(destination: EpisodePreviewView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)) {
+                NavigationLink(destination: EpisodeDetailView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)) {
                     HStack(alignment: .top, spacing: 10) {
                         if let imageURL = episode.imageURL, let url = URL(string: imageURL) {
                             AsyncImage(url: url) { image in
@@ -563,18 +565,18 @@ struct PodcastDetailView: View {
                             .overlay(RoundedRectangle(cornerRadius: 8)
                                 .stroke(Color.black.opacity(0.2), lineWidth: 0.5))
                         }
-
+                        
                         VStack(alignment: .leading, spacing: 4) {
                             Text(episode.title)
                                 .font(.headline)
-
+                            
                             HStack(spacing: 8) {
                                 if let pubDate = episode.pubDate {
                                     Text(pubDate.formatted(date: .abbreviated, time: .omitted))
                                 } else {
                                     Text("Date not available")
                                 }
-
+                                
                                 if let duration = episode.durationInMinutes {
                                     Text("• \(duration)")
                                 }
@@ -596,16 +598,16 @@ struct PodcastDetailView: View {
             }
         }
     }
-
+    
     func fetchEpisodes(from feedUrl: String) {
         guard let url = URL(string: feedUrl) else { return }
-
+        
         URLSession.shared.dataTask(with: url) { data, _, error in
             guard let data = data else {
                 print("Error fetching data: \(error?.localizedDescription ?? "Unknown error")")
                 return
             }
-
+            
             let parser = RSSParser()
             let result = parser.parse(data: data)
             DispatchQueue.main.async {
@@ -615,8 +617,8 @@ struct PodcastDetailView: View {
     }
 }
 
-//MARK: - EpisodePreviewView
-struct EpisodePreviewView: View {
+//MARK: - EpisodeDetailView
+struct EpisodeDetailView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     
     let episode: Episode
@@ -672,6 +674,7 @@ struct EpisodePreviewView: View {
                         if audioVM.episode?.id == episode.id {
                             audioVM.togglePlayPause()
                         } else {
+                            AudioPlayerViewModel.shared.addToQueue(episode)
                             audioVM.load(episode: episode, podcastImageURL: podcastImageURL)
                             audioVM.togglePlayPause()
                         }
@@ -687,7 +690,7 @@ struct EpisodePreviewView: View {
                 Button(action: {
                     AudioPlayerViewModel.shared.addToQueue(episode)
                 }){
-                    Label("Add to Queue", systemImage: "music.note.list")
+                    Label("Add to Queue", systemImage: "text.badge.plus")
                 }
                 
                 Divider()
@@ -824,7 +827,7 @@ struct EpisodePlayerView: View {
 //MARK: - MiniPlayerView
 struct MiniPlayerView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-
+    
     var body: some View {
         if audioVM.episode != nil {
             ZStack {
@@ -853,7 +856,7 @@ struct MiniPlayerView: View {
                         Image(systemName: "gobackward")
                             .foregroundColor(.primary)
                     }
-
+                    
                     Button(action: {
                         audioVM.togglePlayPause()
                     }) {
@@ -861,7 +864,7 @@ struct MiniPlayerView: View {
                             .foregroundColor(.primary)
                             .font(.title)
                     }
-
+                    
                     Button(action: {
                         audioVM.skipForward()
                     }) {
@@ -883,7 +886,7 @@ struct MiniPlayerView: View {
 //MARK: - LibraryView
 struct LibraryView: View {
     @EnvironmentObject var libraryVM: LibraryViewModel
-
+    
     var body: some View {
         NavigationStack {
             List(libraryVM.subscriptions) { podcast in
@@ -900,7 +903,7 @@ struct LibraryView: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(Color.black, lineWidth: 0.5)
                         )
-
+                        
                         VStack(alignment: .leading) {
                             Text(podcast.collectionName)
                                 .font(.headline)
@@ -916,16 +919,17 @@ struct LibraryView: View {
     }
 }
 
+//MARK: - QueueView
 struct QueueView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-
+    
     var body: some View {
         NavigationStack {
             VStack {
                 if audioVM.episodeQueue.isEmpty {
                     VStack {
                         Spacer()
-                        Image(systemName: "music.note.list")
+                        Image(systemName: "text.badge.plus")
                             .font(.system(size: 50))
                             .foregroundColor(.gray)
                             .padding(.bottom, 10)
@@ -939,7 +943,7 @@ struct QueueView: View {
                 } else {
                     List(audioVM.episodeQueue) { episode in
                         HStack(spacing: 12) {
-                            AsyncImage(url: URL(string: episode.imageURL ?? "")) { phase in
+                            AsyncImage(url: URL(string: episode.podcastImageURL ?? "")) { phase in
                                 switch phase {
                                 case .empty:
                                     Color.gray
@@ -953,7 +957,7 @@ struct QueueView: View {
                                         .cornerRadius(8)
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 8)
-                                                .stroke(Color.black, lineWidth: 1.5)
+                                                .stroke(Color.black, lineWidth: 0.5)
                                         )
                                 case .failure:
                                     Color.gray
@@ -963,7 +967,7 @@ struct QueueView: View {
                                     EmptyView()
                                 }
                             }
-
+                            
                             Text(episode.title)
                                 .font(.headline)
                                 .lineLimit(2)
@@ -978,37 +982,6 @@ struct QueueView: View {
     }
 }
 
-/*
-struct QueueView: View {
-    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-
-    var body: some View {
-        VStack {
-            if audioVM.episodeQueue.isEmpty {
-                VStack {
-                    Spacer()
-                    Image(systemName: "music.note.list")
-                        .font(.system(size: 50))
-                        .foregroundColor(.gray)
-                        .padding(.bottom, 10)
-                    Text("Add podcasts to your queue")
-                        .font(.title3)
-                        .foregroundColor(.gray)
-                    Spacer()
-                }
-                .multilineTextAlignment(.center)
-                .padding()
-            } else {
-                List(audioVM.episodeQueue) { episode in
-                    Text(episode.title)
-                }
-                .listStyle(.plain)
-                .navigationTitle("Up Next")
-            }
-        }
-    }
-}
-*/
 #Preview {
     ContentView()
 }
