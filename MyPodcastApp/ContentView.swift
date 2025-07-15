@@ -847,6 +847,7 @@ struct MiniPlayerView: View {
                     }
                     
                     Spacer()
+                    
                 }
                 
                 HStack(spacing: 24) {
@@ -881,7 +882,7 @@ struct MiniPlayerView: View {
             }
         }
     }
-}
+} 
 
 //MARK: - LibraryView
 struct LibraryView: View {
@@ -922,10 +923,10 @@ struct LibraryView: View {
 //MARK: - QueueView
 struct QueueView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-    
+
     var body: some View {
         NavigationStack {
-            VStack {
+            List {
                 if audioVM.episodeQueue.isEmpty {
                     VStack {
                         Spacer()
@@ -938,10 +939,11 @@ struct QueueView: View {
                             .foregroundColor(.gray)
                         Spacer()
                     }
+                    .frame(maxWidth: .infinity)
                     .multilineTextAlignment(.center)
-                    .padding()
+                    .listRowBackground(Color.clear)
                 } else {
-                    List(audioVM.episodeQueue) { episode in
+                    ForEach(audioVM.episodeQueue) { episode in
                         HStack(spacing: 12) {
                             AsyncImage(url: URL(string: episode.podcastImageURL ?? "")) { phase in
                                 switch phase {
@@ -967,17 +969,27 @@ struct QueueView: View {
                                     EmptyView()
                                 }
                             }
-                            
+
                             Text(episode.title)
                                 .font(.headline)
                                 .lineLimit(2)
                         }
                         .padding(.vertical, 4)
                     }
-                    .listStyle(.plain)
+                    .onMove { source, destination in
+                        audioVM.episodeQueue.move(fromOffsets: source, toOffset: destination)
+                    }
+                    .onDelete { indexSet in
+                        print("🗑 DELETE: \(indexSet)")
+                        audioVM.episodeQueue.remove(atOffsets: indexSet)
+                    }
                 }
             }
+   //         .listStyle(.plain)
             .navigationTitle("Queue")
+            .toolbar {
+                EditButton()
+            }
         }
     }
 }
