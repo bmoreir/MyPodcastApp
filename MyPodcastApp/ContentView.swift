@@ -292,7 +292,7 @@ class AudioPlayerViewModel: ObservableObject {
         if isPlaying {
             player.pause()
             isPlaying = false
-            savePlaybackProgress() //new
+            savePlaybackProgress()
         } else {
             player.play()
             isPlaying = true
@@ -486,6 +486,7 @@ struct SearchView: View {
                         }
                     }
                 }
+                .listStyle(.plain)
             }
             
             .navigationTitle("Search")
@@ -629,6 +630,10 @@ struct EpisodeDetailView: View {
         audioVM.episode?.id == episode.id && audioVM.isPlaying
     }
     
+    var isInQueue: Bool {
+        audioVM.episodeQueue.contains(where: { $0.id == episode.id })
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
@@ -688,10 +693,19 @@ struct EpisodeDetailView: View {
                 }
                 
                 Button(action: {
-                    AudioPlayerViewModel.shared.addToQueue(episode)
-                }){
-                    Label("Add to Queue", systemImage: "text.badge.plus")
+                    if isInQueue {
+                        audioVM.episodeQueue.removeAll { $0.id == episode.id }
+                    } else {
+                        audioVM.addToQueue(episode)
+                    }
+                }) {
+                    Label(
+                        isInQueue ? "Remove from Queue" : "Add to Queue",
+                        systemImage: isInQueue ? "text.badge.minus" : "text.badge.plus"
+                    )
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(isInQueue ? .red : .blue)
                 
                 Divider()
                 
@@ -915,6 +929,7 @@ struct LibraryView: View {
                     }
                 }
             }
+            .listStyle(.plain)
             .navigationTitle("Library")
         }
     }
@@ -923,13 +938,14 @@ struct LibraryView: View {
 //MARK: - QueueView
 struct QueueView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    @State private var isEditing = false
 
     var body: some View {
         NavigationStack {
-            List {
+            VStack {
                 if audioVM.episodeQueue.isEmpty {
+                    Spacer()
                     VStack {
-                        Spacer()
                         Image(systemName: "text.badge.plus")
                             .font(.system(size: 50))
                             .foregroundColor(.gray)
@@ -937,60 +953,87 @@ struct QueueView: View {
                         Text("Add podcasts to your queue")
                             .font(.title3)
                             .foregroundColor(.gray)
-                        Spacer()
                     }
-                    .frame(maxWidth: .infinity)
                     .multilineTextAlignment(.center)
-                    .listRowBackground(Color.clear)
+                    .padding()
+                    Spacer()
                 } else {
-                    ForEach(audioVM.episodeQueue) { episode in
-                        HStack(spacing: 12) {
-                            AsyncImage(url: URL(string: episode.podcastImageURL ?? "")) { phase in
-                                switch phase {
-                                case .empty:
-                                    Color.gray
-                                        .frame(width: 60, height: 60)
-                                        .cornerRadius(8)
-                                case .success(let image):
-                                    image
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 60, height: 60)
-                                        .cornerRadius(8)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 8)
-                                                .stroke(Color.black, lineWidth: 0.5)
-                                        )
-                                case .failure:
-                                    Color.gray
-                                        .frame(width: 60, height: 60)
-                                        .cornerRadius(8)
-                                @unknown default:
-                                    EmptyView()
+                    List {
+                        ForEach(Array(audioVM.episodeQueue.enumerated()), id: \.element.id) { index, episode in
+                            HStack(spacing: 12) {
+
+                                AsyncImage(url: URL(string: episode.podcastImageURL ?? "")) { phase in
+                                    switch phase {
+                                    case .empty:
+                                        Color.gray
+                                            .frame(width: 60, height: 60)
+                                            .cornerRadius(8)
+                                    case .success(let image):
+                                        image
+                                            .resizable()
+                                            .scaledToFill()
+                                            .frame(width: 60, height: 60)
+                                            .cornerRadius(8)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 8)
+                                                    .stroke(Color.black, lineWidth: 0.5)
+                                            )
+                                    case .failure:
+                                        Color.gray
+                                            .frame(width: 60, height: 60)
+                                            .cornerRadius(8)
+                                    @unknown default:
+                                        EmptyView()
+                                    }
+                                }
+
+                                Text(episode.title)
+                                    .font(.headline)
+                                    .lineLimit(2)
+                            }
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                            .swipeActions(edge: .trailing) {
+                                Button(role: .destructive) {
+                                    audioVM.episodeQueue.removeAll { $0.id == episode.id }
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
                                 }
                             }
-
-                            Text(episode.title)
-                                .font(.headline)
-                                .lineLimit(2)
+                            .onDrag {
+                                NSItemProvider(object: String(index) as NSString)
+                            }
                         }
-                        .padding(.vertical, 4)
+                        .onMove(perform: moveEpisode)
+                        .moveDisabled(false)
                     }
-                    .onMove { source, destination in
-                        audioVM.episodeQueue.move(fromOffsets: source, toOffset: destination)
-                    }
-                    .onDelete { indexSet in
-                        print("🗑 DELETE: \(indexSet)")
-                        audioVM.episodeQueue.remove(atOffsets: indexSet)
+                    .listStyle(.plain)
+                    .environment(\.editMode, isEditing ? .constant(.active) : .constant(.inactive))
+                }
+            }
+            .navigationTitle("Queue")
+            .toolbar {
+                  ToolbarItem(placement: .navigationBarLeading) {
+                      if !audioVM.episodeQueue.isEmpty {
+                          Button(isEditing ? "Done" : "Reorder") {
+                              isEditing.toggle()
+                          }
+                      }
+                  }
+                  ToolbarItem(placement: .navigationBarTrailing) {
+                      if !audioVM.episodeQueue.isEmpty {
+                          Button("Clear") {
+                              audioVM.episodeQueue.removeAll()
+                          }
+                          .foregroundColor(.red)
                     }
                 }
             }
-   //         .listStyle(.plain)
-            .navigationTitle("Queue")
-            .toolbar {
-                EditButton()
-            }
         }
+    }
+
+    private func moveEpisode(from source: IndexSet, to destination: Int) {
+        audioVM.episodeQueue.move(fromOffsets: source, toOffset: destination)
     }
 }
 
