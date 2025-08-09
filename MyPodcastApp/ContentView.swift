@@ -345,10 +345,6 @@ class AudioPlayerViewModel: ObservableObject {
     }
     
     func addToQueue(_ episode: Episode) {
-        guard episode.id != self.episode?.id,
-              !episodeQueue.contains(where: { $0.id == episode.id }) else {
-            return
-        }
         episodeQueue.append(episode)
     }
     
@@ -477,9 +473,7 @@ struct SearchView: View {
                             }
                             .frame(width: 60, height: 60)
                             .cornerRadius(8)
-                            .overlay(RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.black, lineWidth: 0.5))
-                            
+                            .shadow(radius: 6)
                             VStack(alignment: .leading) {
                                 Text(podcast.collectionName)
                                     .font(.headline)
@@ -507,53 +501,49 @@ struct PodcastDetailView: View {
     var body: some View {
         List {
             Section {
-                ZStack {
-                    Color.white // Match app background
-                    VStack(spacing: 12) {
-                        if let imageUrl = URL(string: podcast.artworkUrl600) {
-                            AsyncImage(url: imageUrl) { image in
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(width: 200)
-                                    .cornerRadius(16)
-                                    .shadow(radius: 6)
-                            } placeholder: {
-                                Color.gray.opacity(0.3)
-                                    .frame(width: 200, height: 200)
-                                    .cornerRadius(16)
-                            }
+                VStack(spacing: 12) {
+                    if let imageUrl = URL(string: podcast.artworkUrl600) {
+                        AsyncImage(url: imageUrl) { image in
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 200)
+                                .cornerRadius(16)
+                                .shadow(radius: 6)
+                        } placeholder: {
+                            Color.gray.opacity(0.3)
+                                .frame(width: 200, height: 200)
+                                .cornerRadius(16)
                         }
-                        Text(podcast.collectionName)
-                            .font(.title)
-                            .fontWeight(.semibold)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                        
-                        Text("\(episodes.count) episodes")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                        
-                        Button(action: {
-                            if libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
-                                libraryVM.unsubscribe(from: podcast)
-                            } else {
-                                libraryVM.subscribe(to: podcast)
-                            }
-                        }) {
-                            Text(libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) ? "Unsubscribe" : "Subscribe")
-                                .font(.subheadline)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(Color.blue.opacity(0.1))
-                                .cornerRadius(8)
-                        }
-                        
-                        Divider()
-                            .padding(.top, 4)
                     }
-      //              .frame(maxWidth: .infinity)
-       //             .padding(.vertical)
+                    
+                    Text(podcast.collectionName)
+                        .font(.title)
+                        .fontWeight(.semibold)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                    
+                    Text("\(episodes.count) episodes")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                    
+                    Button(action: {
+                        if libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
+                            libraryVM.unsubscribe(from: podcast)
+                        } else {
+                            libraryVM.subscribe(to: podcast)
+                        }
+                    }) {
+                        Text(libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) ? "Unsubscribe" : "Subscribe")
+                            .font(.subheadline)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue.opacity(0.1))
+                            .cornerRadius(8)
+                    }
+                    
+                    Divider()
+                        .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity)
                 .listRowInsets(EdgeInsets())
@@ -599,7 +589,7 @@ struct PodcastDetailView: View {
             }
         }
         .listStyle(.plain)
- //       .navigationTitle(podcast.collectionName)
+        .navigationTitle(podcast.collectionName)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             if let feedUrl = podcast.feedUrl {
@@ -641,7 +631,7 @@ struct EpisodeDetailView: View {
     var isInQueue: Bool {
         audioVM.episodeQueue.contains(where: { $0.id == episode.id })
     }
-
+    
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
@@ -656,8 +646,6 @@ struct EpisodeDetailView: View {
                     .frame(maxWidth: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .shadow(radius: 6)
-  //                  .overlay(RoundedRectangle(cornerRadius: 16)
-  //                      .stroke(Color.black, lineWidth: 0.5))
                     .padding(.top)
                 }
                 HStack(spacing: 8) {
@@ -718,33 +706,10 @@ struct EpisodeDetailView: View {
                 
                 Divider()
                 
-                var parsedDescription: AttributedString? {
-                    guard let desc = episode.description,
-                          let data = desc.data(using: .utf8) else { return nil }
-                    
-                    let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-                        .documentType: NSAttributedString.DocumentType.html,
-                        .characterEncoding: String.Encoding.utf8.rawValue
-                    ]
-                    
-                    if let nsAttrStr = try? NSAttributedString(data: data, options: options, documentAttributes: nil),
-                       var swiftUIAttrStr = try? AttributedString(nsAttrStr, including: \.uiKit) {
-                        
-                        for run in swiftUIAttrStr.runs {
-                            swiftUIAttrStr[run.range].font = .system(size: 16)
-                        }
-                        
-                        return swiftUIAttrStr
-                    }
-                    
-                    return nil
+                if let desc = episode.description {
+                    EpisodeDescriptionView(htmlString: desc)
                 }
                 
-                if let description = parsedDescription {
-                    Text(description)
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
             }
         }
         .navigationTitle("Episode")
@@ -756,6 +721,38 @@ struct EpisodeDetailView: View {
                 podcastImageURL: podcastImageURL
             )
         }
+    }
+}
+
+//MARK: - EpisodeDescriptionView
+struct EpisodeDescriptionView: View {
+    let htmlString: String
+    
+    var body: some View {
+        if let description = parsedDescription {
+            Text(description)
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    
+    private var parsedDescription: AttributedString? {
+        guard let data = htmlString.data(using: .utf8) else { return nil }
+        
+        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+            .documentType: NSAttributedString.DocumentType.html,
+            .characterEncoding: String.Encoding.utf8.rawValue
+        ]
+        
+        if let nsAttrStr = try? NSAttributedString(data: data, options: options, documentAttributes: nil),
+           var swiftUIAttrStr = try? AttributedString(nsAttrStr, including: \.uiKit) {
+            for run in swiftUIAttrStr.runs {
+                swiftUIAttrStr[run.range].font = .system(size: 16)
+            }
+            return swiftUIAttrStr
+        }
+        
+        return nil
     }
 }
 
@@ -792,8 +789,7 @@ struct EpisodePlayerView: View {
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .overlay(RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.black, lineWidth: 0.5))
+                    .shadow(radius: 6)
                     .padding(.top)
                 }
                 HStack(spacing: 8) {
@@ -884,10 +880,7 @@ struct MiniPlayerView: View {
                         }
                         .frame(width: 40, height: 40)
                         .cornerRadius(8)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.black, lineWidth: 0.5)
-                        )
+                        .shadow(radius: 6)
                     }
                     
                     Spacer()
@@ -926,7 +919,7 @@ struct MiniPlayerView: View {
             }
         }
     }
-} 
+}
 
 //MARK: - LibraryView
 struct LibraryView: View {
@@ -944,11 +937,7 @@ struct LibraryView: View {
                         }
                         .frame(width: 60, height: 60)
                         .cornerRadius(8)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.black, lineWidth: 0.5)
-                        )
-                        
+                        .shadow(radius: 6)
                         VStack(alignment: .leading) {
                             Text(podcast.collectionName)
                                 .font(.headline)
@@ -966,230 +955,10 @@ struct LibraryView: View {
 }
 
 //MARK: - QueueView
-/*
 struct QueueView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @State private var isEditing = false
     
-    private var reorderableQueue: [Episode] {
-        audioVM.episodeQueue.filter { $0.id != audioVM.episode?.id }
-    }
-    
-    var body: some View {
-        NavigationStack {
-            VStack {
-                if audioVM.episodeQueue.isEmpty && audioVM.episode == nil {
-                    Spacer()
-                    VStack {
-                        Image(systemName: "text.badge.plus")
-                            .font(.system(size: 50))
-                            .foregroundColor(.gray)
-                            .padding(.bottom, 10)
-                        Text("Add podcasts to your queue")
-                            .font(.title3)
-                            .foregroundColor(.gray)
-                    }
-                    .multilineTextAlignment(.center)
-                    .padding()
-                    Spacer()
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            // ✅ Now Playing Section
-                /*            if let nowPlaying = audioVM.episode {
-                                VStack(alignment: .leading) {
-                                    Text("Now Playing")
-                                        .font(.subheadline)
-                                        .foregroundColor(.gray)
-                                        .padding(.horizontal)
-                                    
-                                    HStack(spacing: 12) {
-                                        AsyncImage(url: URL(string: nowPlaying.podcastImageURL ?? "")) { phase in
-                                            switch phase {
-                                            case .empty:
-                                                Color.gray
-                                            case .success(let image):
-                                                image.resizable().scaledToFill()
-                                            case .failure:
-                                                Color.gray
-                                            @unknown default:
-                                                EmptyView()
-                                            }
-                                        }
-                                        .frame(width: 60, height: 60)
-                                        .cornerRadius(8)
-                                        
-                                        Text(nowPlaying.title)
-                                            .font(.headline)
-                                            .lineLimit(2)
-                                        
-                                        Spacer()
-                                    }
-                                    .padding()
-                                    .contentShape(Rectangle()) // ← ensures full row is tappable
-                                    .onTapGesture {
-                                        audioVM.isPlayerSheetVisible = true
-                                    }
-                                    
-                                    if !reorderableQueue.isEmpty {
-                                                Divider()
-                                                    .padding(.top, 4)
-
-                                                Text("Queue")
-                                                    .font(.subheadline)
-                                                    .foregroundColor(.gray)
-                                                    .padding(.horizontal)
-                                                    .padding(.bottom, 4)
-                                            }
-                                }
-                            } */
-                            if let nowPlaying = audioVM.episode {
-                                VStack(alignment: .leading, spacing: 0) {
-                                    Text("Now Playing")
-                                        .font(.subheadline)
-                                        .foregroundColor(.gray)
-                                        .padding(.horizontal)
-                                        .padding(.top)
-
-                                    HStack(spacing: 12) {
-                                        AsyncImage(url: URL(string: nowPlaying.podcastImageURL ?? "")) { phase in
-                                            switch phase {
-                                            case .empty:
-                                                Color.gray
-                                                    .frame(width: 60, height: 60)
-                                                    .cornerRadius(8)
-                                            case .success(let image):
-                                                image
-                                                    .resizable()
-                                                    .scaledToFill()
-                                                    .frame(width: 60, height: 60)
-                                                    .cornerRadius(8)
-                                                    .overlay(
-                                                        RoundedRectangle(cornerRadius: 8)
-                                                            .stroke(Color.black, lineWidth: 0.5)
-                                                    )
-                                            case .failure:
-                                                Color.gray
-                                                    .frame(width: 60, height: 60)
-                                                    .cornerRadius(8)
-                                            @unknown default:
-                                                EmptyView()
-                                            }
-                                        }
-
-                                        Text(nowPlaying.title)
-                                            .font(.headline)
-                                            .lineLimit(2)
-
-                                        Spacer()
-                                    }
-                                    .padding()
-                                    .contentShape(Rectangle()) // ensure full row is tappable
-                                    .onTapGesture {
-                                        audioVM.isPlayerSheetVisible = true
-                                    }
-
-                                    // ✅ Only show this if the queue has items
-                                    if !reorderableQueue.isEmpty {
-                                        Divider()
-                                            .padding(.horizontal)
-                                            .padding(.top, 4)
-
-                                        Text("Queue")
-                                            .font(.subheadline)
-                                            .foregroundColor(.gray)
-                                            .padding(.horizontal)
-                                            .padding(.vertical, 6)
-                                    }
-                                }
-                            }
-                            
-                            // ✅ Queue List (excluding currently playing)
-                            List {
-                                ForEach(Array(reorderableQueue.enumerated()), id: \.element.id) { index, episode in
-                                    HStack(spacing: 12) {
-                                        AsyncImage(url: URL(string: episode.podcastImageURL ?? "")) { phase in
-                                            switch phase {
-                                            case .empty:
-                                                Color.gray
-                                            case .success(let image):
-                                                image.resizable().scaledToFill()
-                                            case .failure:
-                                                Color.gray
-                                            @unknown default:
-                                                EmptyView()
-                                            }
-                                        }
-                                        .frame(width: 60, height: 60)
-                                        .cornerRadius(8)
-                                        
-                                        Text(episode.title)
-                                            .font(.headline)
-                                            .lineLimit(2)
-                                    }
-                                    .padding(.vertical, 4)
-                                    .contentShape(Rectangle())
-                                    .swipeActions(edge: .trailing) {
-                                        Button(role: .destructive) {
-                                            audioVM.episodeQueue.removeAll { $0.id == episode.id }
-                                        } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                                    .onDrag {
-                                        NSItemProvider(object: String(index) as NSString)
-                                    }
-                                }
-                                .onMove(perform: moveEpisode)
-                                .moveDisabled(false)
-                            }
-                            .listStyle(.plain)
-                            .frame(minHeight: 300) // avoids collapse when list is short
-                            .environment(\.editMode, isEditing ? .constant(.active) : .constant(.inactive))
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Queue")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    if !audioVM.episodeQueue.isEmpty {
-                        Button(isEditing ? "Done" : "Reorder") {
-                            isEditing.toggle()
-                        }
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    if !audioVM.episodeQueue.isEmpty {
-                        Button("Clear") {
-                            audioVM.episodeQueue.removeAll()
-                        }
-                        .foregroundColor(.red)
-                    }
-                }
-            }
-        }
-    }
-
-    private func moveEpisode(from source: IndexSet, to destination: Int) {
-        guard let nowPlayingID = audioVM.episode?.id else {
-            audioVM.episodeQueue.move(fromOffsets: source, toOffset: destination)
-            return
-        }
-
-        var filteredQueue = audioVM.episodeQueue.filter { $0.id != nowPlayingID }
-        filteredQueue.move(fromOffsets: source, toOffset: destination)
-
-        if let nowPlaying = audioVM.episode {
-            audioVM.episodeQueue = [nowPlaying] + filteredQueue
-        }
-    }
-} */
-
-struct QueueView: View {
-    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-    @State private var isEditing = false
-
     var body: some View {
         NavigationStack {
             VStack {
@@ -1211,7 +980,7 @@ struct QueueView: View {
                     List {
                         ForEach(Array(audioVM.episodeQueue.enumerated()), id: \.element.id) { index, episode in
                             HStack(spacing: 12) {
-
+                                
                                 AsyncImage(url: URL(string: episode.podcastImageURL ?? "")) { phase in
                                     switch phase {
                                     case .empty:
@@ -1224,10 +993,7 @@ struct QueueView: View {
                                             .scaledToFill()
                                             .frame(width: 60, height: 60)
                                             .cornerRadius(8)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 8)
-                                                    .stroke(Color.black, lineWidth: 0.5)
-                                            )
+                                            .shadow(radius: 6)
                                     case .failure:
                                         Color.gray
                                             .frame(width: 60, height: 60)
@@ -1236,7 +1002,7 @@ struct QueueView: View {
                                         EmptyView()
                                     }
                                 }
-
+                                
                                 Text(episode.title)
                                     .font(.headline)
                                     .lineLimit(2)
@@ -1263,25 +1029,25 @@ struct QueueView: View {
             }
             .navigationTitle("Queue")
             .toolbar {
-                  ToolbarItem(placement: .navigationBarLeading) {
-                      if !audioVM.episodeQueue.isEmpty {
-                          Button(isEditing ? "Done" : "Reorder") {
-                              isEditing.toggle()
-                          }
-                      }
-                  }
-                  ToolbarItem(placement: .navigationBarTrailing) {
-                      if !audioVM.episodeQueue.isEmpty {
-                          Button("Clear") {
-                              audioVM.episodeQueue.removeAll()
-                          }
-                          .foregroundColor(.red)
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if !audioVM.episodeQueue.isEmpty {
+                        Button(isEditing ? "Done" : "Reorder") {
+                            isEditing.toggle()
+                        }
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if !audioVM.episodeQueue.isEmpty {
+                        Button("Clear") {
+                            audioVM.episodeQueue.removeAll()
+                        }
+                        .foregroundColor(.red)
                     }
                 }
             }
         }
     }
-
+    
     private func moveEpisode(from source: IndexSet, to destination: Int) {
         audioVM.episodeQueue.move(fromOffsets: source, toOffset: destination)
     }
