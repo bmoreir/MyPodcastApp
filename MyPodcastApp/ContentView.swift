@@ -27,10 +27,10 @@ struct Podcast: Identifiable, Codable {
 
 struct Episode: Identifiable {
     var id: String
+    var duration: String?
     let title: String
     let pubDate: Date?
     let audioURL: String
-    let duration: String?
     let imageURL: String?
     let podcastImageURL: String?
     let description: String?
@@ -210,12 +210,14 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var isPlaying = false
     @Published var currentTime: Double = 0
     @Published var durationTime: Double = 0
-    @Published var currentEpisodeID: String? = nil
     @Published var isPlayerSheetVisible: Bool = false
-    @Published var showMiniPlayer: Bool = false
     @Published var podcastImageURL: String?
     @Published var episodeQueue: [Episode] = []
     @Published private(set) var elapsedTimes: [String: Double] = [:]
+    
+    var showMiniPlayer: Bool {
+        episode != nil && (isPlaying || currentTime > 0)
+    }
     
     private init() {
         if let data = UserDefaults.standard.data(forKey: elapsedTimesKey),
@@ -235,8 +237,9 @@ class AudioPlayerViewModel: ObservableObject {
         if self.episode?.audioURL == episode.audioURL { return }
         
         self.episode = episode
-        self.currentEpisodeID = episode.id
         self.podcastImageURL = podcastImageURL
+        
+        episodeQueue.removeAll { $0.id == episode.id }
         
         guard let url = URL(string: episode.audioURL) else { return }
         
@@ -296,7 +299,6 @@ class AudioPlayerViewModel: ObservableObject {
         } else {
             player.play()
             isPlaying = true
-            showMiniPlayer = true
         }
     }
     
@@ -320,9 +322,37 @@ class AudioPlayerViewModel: ObservableObject {
     
     func formattedTime(_ seconds: Double) -> String {
         guard seconds.isFinite && !seconds.isNaN else { return "0:00" }
-        let mins = Int(seconds) / 60
-        let secs = Int(seconds) % 60
-        return String(format: "%d:%02d", mins, secs)
+        
+        let totalSeconds = Int(seconds)
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let secs = totalSeconds % 60
+        
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        } else {
+            return String(format: "%d:%02d", minutes, secs)
+        }
+    }
+    
+    private func updateDurationFromAsset(_ asset: AVURLAsset) {
+        Task {
+            do {
+                let duration = try await asset.load(.duration)
+                let seconds = CMTimeGetSeconds(duration)
+                if seconds.isFinite && seconds > 0 {
+                    await MainActor.run {
+                        self.durationTime = seconds
+                        if var currentEpisode = self.episode {
+                            currentEpisode.duration = self.formattedTime(seconds)
+                            self.episode = currentEpisode
+                        }
+                    }
+                }
+            } catch {
+                print("Failed to load real duration: \(error)")
+            }
+        }
     }
     
     @objc private func playerDidFinishPlaying(notification: Notification) {
@@ -331,12 +361,11 @@ class AudioPlayerViewModel: ObservableObject {
             
             self.isPlaying = false
             self.currentTime = 0
-            self.showMiniPlayer = false
             self.isPlayerSheetVisible = false
             
             if !episodeQueue.isEmpty {
                 let nextEpisode = episodeQueue.removeFirst()
-                self.load(episode: nextEpisode, podcastImageURL: self.podcastImageURL)
+                self.playNow(nextEpisode, podcastImageURL: self.podcastImageURL)
                 self.play()
             } else {
                 self.player?.seek(to: .zero)
@@ -351,7 +380,6 @@ class AudioPlayerViewModel: ObservableObject {
     func play() {
         player?.play()
         isPlaying = true
-        showMiniPlayer = true
     }
     
     private func saveElapsedTimes() {
@@ -365,6 +393,11 @@ class AudioPlayerViewModel: ObservableObject {
             elapsedTimes[current.audioURL] = currentTime
             saveElapsedTimes()
         }
+    }
+    
+    func playNow(_ episode: Episode, podcastImageURL: String? = nil) {
+        load(episode: episode, podcastImageURL: podcastImageURL)
+        togglePlayPause()
     }
 }
 
@@ -676,11 +709,8 @@ struct EpisodeDetailView: View {
                         if audioVM.episode?.id == episode.id {
                             audioVM.togglePlayPause()
                         } else {
-                            AudioPlayerViewModel.shared.addToQueue(episode)
-                            audioVM.load(episode: episode, podcastImageURL: podcastImageURL)
-                            audioVM.togglePlayPause()
+                            audioVM.playNow(episode, podcastImageURL: podcastImageURL)
                         }
-                        audioVM.showMiniPlayer = true
                     }) {
                         Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
                             .resizable()
@@ -822,7 +852,7 @@ struct EpisodePlayerView: View {
                     }
                     Button(action: {
                         if audioVM.episode?.id != episode.id {
-                            audioVM.load(episode: episode)
+                            audioVM.playNow(episode)
                         }
                         audioVM.togglePlayPause() }) {
                             Image(systemName: audioVM.isPlaying ? "pause.circle.fill" : "play.circle.fill")
@@ -870,50 +900,61 @@ struct MiniPlayerView: View {
     
     var body: some View {
         if audioVM.episode != nil {
-            ZStack {
                 HStack {
-                    if let url = URL(string: audioVM.podcastImageURL ?? "") {
+                    if let imageURL = audioVM.episode?.imageURL ?? audioVM.podcastImageURL,
+                       let url = URL(string: imageURL) {
                         AsyncImage(url: url) { image in
                             image.resizable()
                         } placeholder: {
                             Color.gray
                         }
-                        .frame(width: 40, height: 40)
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 50, height: 50)
                         .cornerRadius(8)
                         .shadow(radius: 6)
                     }
                     
+                    VStack(alignment: .leading, spacing: 2) {
+                        if let episodeTitle = audioVM.episode?.title {
+                            Text(episodeTitle)
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+                    }
+                    
                     Spacer()
                     
+                    HStack(spacing: 24) {
+                        Button(action: {
+                            audioVM.skipBackward()
+                        }) {
+                            Image(systemName: "gobackward")
+                                .foregroundColor(.primary)
+                        }
+                        
+                        Button(action: {
+                            audioVM.togglePlayPause()
+                        }) {
+                            Image(systemName: audioVM.isPlaying ? "pause.fill" : "play.fill")
+                                .foregroundColor(.primary)
+                                .font(.title)
+                        }
+                        
+                        Button(action: {
+                            audioVM.skipForward()
+                        }) {
+                            Image(systemName: "goforward")
+                                .foregroundColor(.primary)
+                        }
+                    }
                 }
-                
-                HStack(spacing: 24) {
-                    Button(action: {
-                        audioVM.skipBackward()
-                    }) {
-                        Image(systemName: "gobackward")
-                            .foregroundColor(.primary)
-                    }
-                    
-                    Button(action: {
-                        audioVM.togglePlayPause()
-                    }) {
-                        Image(systemName: audioVM.isPlaying ? "pause.fill" : "play.fill")
-                            .foregroundColor(.primary)
-                            .font(.title)
-                    }
-                    
-                    Button(action: {
-                        audioVM.skipForward()
-                    }) {
-                        Image(systemName: "goforward")
-                            .foregroundColor(.primary)
-                    }
-                }
-            }
-            .padding(.horizontal)
+            .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(.ultraThinMaterial)
+            .background(Color(.systemGray6))
+            .cornerRadius(12)
+            .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 4)
             .onTapGesture {
                 audioVM.isPlayerSheetVisible = true
             }
