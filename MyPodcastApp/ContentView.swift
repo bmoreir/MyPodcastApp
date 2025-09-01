@@ -25,7 +25,7 @@ struct Podcast: Identifiable, Codable {
     }
 }
 
-struct Episode: Identifiable {
+struct Episode: Identifiable, Hashable {
     var id: String
     var duration: String?
     let title: String
@@ -75,6 +75,15 @@ struct Episode: Identifiable {
             return "\(minutes)min"
         }
     }
+    
+    func hash(into hasher: inout Hasher) {
+            hasher.combine(id)
+            hasher.combine(audioURL)
+        }
+    
+    static func == (lhs: Episode, rhs: Episode) -> Bool {
+            return lhs.id == rhs.id && lhs.audioURL == rhs.audioURL
+        }
 }
 
 struct SearchResults: Decodable {
@@ -205,6 +214,9 @@ class AudioPlayerViewModel: ObservableObject {
     
     private var timeObserverToken: Any?
     private var player: AVPlayer?
+    private var playerItemObserver: NSObjectProtocol?
+    private var currentPlayerItem: AVPlayerItem?
+    private var saveTimer: Timer?
     
     @Published var episode: Episode?
     @Published var isPlaying = false
@@ -227,13 +239,21 @@ class AudioPlayerViewModel: ObservableObject {
     }
     
     deinit {
+        // Clean up observers directly in deinit to avoid actor isolation issues
+        if let observer = playerItemObserver {
+            NotificationCenter.default.removeObserver(observer)
+            playerItemObserver = nil
+        }
+        currentPlayerItem = nil
+        
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
         }
-        NotificationCenter.default.removeObserver(self)
     }
     
     func load(episode: Episode, podcastImageURL: String? = nil) {
+        cleanupObservers() // ADD THIS LINE FIRST
+        
         if self.episode?.audioURL == episode.audioURL { return }
         
         self.episode = episode
@@ -246,14 +266,20 @@ class AudioPlayerViewModel: ObservableObject {
         let asset = AVURLAsset(url: url)
         let playerItem = AVPlayerItem(asset: asset)
         self.player = AVPlayer(playerItem: playerItem)
+        updateDurationFromAsset(asset)
         self.isPlaying = false
         
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(playerDidFinishPlaying),
-            name: .AVPlayerItemDidPlayToEndTime,
-            object: playerItem
-        )
+        // Store reference and add observer with proper cleanup
+        currentPlayerItem = playerItem
+        playerItemObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.playerDidFinishPlaying()
+            }
+        }
         
         Task {
             do {
@@ -273,6 +299,15 @@ class AudioPlayerViewModel: ObservableObject {
             let cmTime = CMTime(seconds: savedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
             player?.seek(to: cmTime)
         }
+    }
+    
+    @MainActor
+    private func cleanupObservers() {
+        if let observer = playerItemObserver {
+            NotificationCenter.default.removeObserver(observer)
+            playerItemObserver = nil
+        }
+        currentPlayerItem = nil
     }
     
     @MainActor
@@ -343,10 +378,7 @@ class AudioPlayerViewModel: ObservableObject {
                 if seconds.isFinite && seconds > 0 {
                     await MainActor.run {
                         self.durationTime = seconds
-                        if var currentEpisode = self.episode {
-                            currentEpisode.duration = self.formattedTime(seconds)
-                            self.episode = currentEpisode
-                        }
+                        self.episode?.duration = self.formattedTime(seconds)
                     }
                 }
             } catch {
@@ -355,7 +387,7 @@ class AudioPlayerViewModel: ObservableObject {
         }
     }
     
-    @objc private func playerDidFinishPlaying(notification: Notification) {
+    private func playerDidFinishPlaying() {
         Task { @MainActor [weak self] in
             guard let self else { return }
             
@@ -365,10 +397,14 @@ class AudioPlayerViewModel: ObservableObject {
             
             if !episodeQueue.isEmpty {
                 let nextEpisode = episodeQueue.removeFirst()
-                self.playNow(nextEpisode, podcastImageURL: self.podcastImageURL)
+                self.load(episode: nextEpisode, podcastImageURL: nextEpisode.podcastImageURL)
                 self.play()
             } else {
+                // Clear the currently playing episode when queue is empty
+                self.episode = nil
+                self.podcastImageURL = nil
                 self.player?.seek(to: .zero)
+                self.player = nil
             }
         }
     }
@@ -391,12 +427,27 @@ class AudioPlayerViewModel: ObservableObject {
     private func savePlaybackProgress() {
         if let current = self.episode {
             elapsedTimes[current.audioURL] = currentTime
-            saveElapsedTimes()
+            //    saveElapsedTimes()
+            saveTimer?.invalidate()
+            saveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+                Task {@MainActor in
+                    self?.saveElapsedTimes()
+                }
+            }
         }
     }
     
     func playNow(_ episode: Episode, podcastImageURL: String? = nil) {
         load(episode: episode, podcastImageURL: podcastImageURL)
+        togglePlayPause()
+    }
+    
+    func playFromQueue(_ episode: Episode) {
+        // Remove episode from queue when it starts playing
+        episodeQueue.removeAll { $0.id == episode.id }
+        
+        // Load and play the episode
+        load(episode: episode, podcastImageURL: episode.podcastImageURL)
         togglePlayPause()
     }
 }
@@ -529,6 +580,9 @@ struct SearchView: View {
 struct PodcastDetailView: View {
     let podcast: Podcast
     @State private var episodes: [Episode] = []
+    @State private var hasLoadedEpisodes = false
+    @State private var isLoadingEpisodes = false
+    @State private var loadingError: String?
     @EnvironmentObject var libraryVM: LibraryViewModel
     
     var body: some View {
@@ -585,39 +639,8 @@ struct PodcastDetailView: View {
             
             ForEach(episodes) { episode in
                 NavigationLink(destination: EpisodeDetailView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)) {
-                    HStack(alignment: .top, spacing: 10) {
-                        if let imageURL = episode.imageURL, let url = URL(string: imageURL) {
-                            AsyncImage(url: url) { image in
-                                image.resizable().scaledToFill()
-                            } placeholder: {
-                                Color.gray.opacity(0.3)
-                            }
-                            .frame(width: 60, height: 60)
-                            .cornerRadius(8)
-                            .overlay(RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.black.opacity(0.2), lineWidth: 0.5))
-                        }
-                        
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(episode.title)
-                                .font(.headline)
-                            
-                            HStack(spacing: 8) {
-                                if let pubDate = episode.pubDate {
-                                    Text(pubDate.formatted(date: .abbreviated, time: .omitted))
-                                } else {
-                                    Text("Date not available")
-                                }
-                                
-                                if let duration = episode.durationInMinutes {
-                                    Text("• \(duration)")
-                                }
-                            }
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                        }
-                    }
-                    .padding(.vertical, 4)
+                    EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
+                        .padding(.vertical, 4)
                 }
             }
         }
@@ -625,8 +648,9 @@ struct PodcastDetailView: View {
         .navigationTitle(podcast.collectionName)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            if let feedUrl = podcast.feedUrl {
+            if !hasLoadedEpisodes, let feedUrl = podcast.feedUrl {
                 fetchEpisodes(from: feedUrl)
+                hasLoadedEpisodes = true
             }
         }
     }
@@ -634,18 +658,108 @@ struct PodcastDetailView: View {
     func fetchEpisodes(from feedUrl: String) {
         guard let url = URL(string: feedUrl) else { return }
         
-        URLSession.shared.dataTask(with: url) { data, _, error in
-            guard let data = data else {
-                print("Error fetching data: \(error?.localizedDescription ?? "Unknown error")")
-                return
-            }
-            
-            let parser = RSSParser()
-            let result = parser.parse(data: data)
+        isLoadingEpisodes = true
+        loadingError = nil
+        
+        URLSession.shared.dataTask(with: url) { data, response, error in
             DispatchQueue.main.async {
-                self.episodes = result
+                self.isLoadingEpisodes = false
+                
+                if let error = error {
+                    self.loadingError = error.localizedDescription
+                    return
+                }
+                
+                guard let data = data else {
+                    self.loadingError = "No data received"
+                    return
+                }
+                
+                let parser = RSSParser()
+                self.episodes = parser.parse(data: data)
             }
         }.resume()
+    }
+}
+
+//MARK: - EpisodeRowView
+struct EpisodeRowView: View {
+    let episode: Episode
+    let podcastImageURL: String?
+    let onPlayTapped: (() -> Void)?
+    
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    
+    init(episode: Episode, podcastImageURL: String?, onPlayTapped: (() -> Void)? = nil) {
+        self.episode = episode
+        self.podcastImageURL = podcastImageURL
+        self.onPlayTapped = onPlayTapped
+    }
+    
+    private var isCurrentlyPlaying: Bool {
+        audioVM.episode?.id == episode.id && audioVM.isPlaying
+    }
+    
+    private var isCurrentEpisode: Bool {
+        audioVM.episode?.id == episode.id
+    }
+    
+    var body: some View {
+        HStack(spacing: 10) {
+            AsyncImage(url: URL(string: episode.imageURL ?? podcastImageURL ?? "")) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Color.gray.opacity(0.3)
+            }
+            .frame(width: 50, height: 50)
+            .cornerRadius(8)
+            .shadow(radius: 6)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(episode.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                    .foregroundColor(isCurrentEpisode ? .blue : .primary)
+                
+                HStack(spacing: 8) {
+                    if let pubDate = episode.pubDate {
+                        Text(pubDate.formatted(date: .abbreviated, time: .omitted))
+                    }
+                    if let duration = episode.durationInMinutes {
+                        Text("• \(duration)")
+                    }
+                }
+                .font(.subheadline)
+                .foregroundColor(.gray)
+            }
+            
+            Spacer()
+            
+            // Play/Pause Button - CHANGED: Better alignment
+            VStack {
+                Spacer()
+                Button(action: {
+                    if let onPlayTapped = onPlayTapped {
+                        onPlayTapped()
+                    } else {
+                        // Default behavior
+                        if isCurrentEpisode {
+                            audioVM.togglePlayPause()
+                        } else {
+                            audioVM.playNow(episode, podcastImageURL: podcastImageURL)
+                        }
+                    }
+                }) {
+                    Image(systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill")
+                        .font(.title2)
+                        .foregroundColor(.blue)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(PlainButtonStyle())
+                Spacer()
+            }
+        }
+        .frame(minHeight: 50) // ADDED: Ensure consistent row height
     }
 }
 
@@ -709,6 +823,7 @@ struct EpisodeDetailView: View {
                         if audioVM.episode?.id == episode.id {
                             audioVM.togglePlayPause()
                         } else {
+                            audioVM.episodeQueue.removeAll { $0.id == episode.id }
                             audioVM.playNow(episode, podcastImageURL: podcastImageURL)
                         }
                     }) {
@@ -900,56 +1015,56 @@ struct MiniPlayerView: View {
     
     var body: some View {
         if audioVM.episode != nil {
-                HStack {
-                    if let imageURL = audioVM.episode?.imageURL ?? audioVM.podcastImageURL,
-                       let url = URL(string: imageURL) {
-                        AsyncImage(url: url) { image in
-                            image.resizable()
-                        } placeholder: {
-                            Color.gray
-                        }
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 50, height: 50)
-                        .cornerRadius(8)
-                        .shadow(radius: 6)
+            HStack {
+                if let imageURL = audioVM.episode?.imageURL ?? audioVM.podcastImageURL,
+                   let url = URL(string: imageURL) {
+                    AsyncImage(url: url) { image in
+                        image.resizable()
+                    } placeholder: {
+                        Color.gray
                     }
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        if let episodeTitle = audioVM.episode?.title {
-                            Text(episodeTitle)
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.leading)
-                        }
-                    }
-                    
-                    Spacer()
-                    
-                    HStack(spacing: 24) {
-                        Button(action: {
-                            audioVM.skipBackward()
-                        }) {
-                            Image(systemName: "gobackward")
-                                .foregroundColor(.primary)
-                        }
-                        
-                        Button(action: {
-                            audioVM.togglePlayPause()
-                        }) {
-                            Image(systemName: audioVM.isPlaying ? "pause.fill" : "play.fill")
-                                .foregroundColor(.primary)
-                                .font(.title)
-                        }
-                        
-                        Button(action: {
-                            audioVM.skipForward()
-                        }) {
-                            Image(systemName: "goforward")
-                                .foregroundColor(.primary)
-                        }
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 50, height: 50)
+                    .cornerRadius(8)
+                    .shadow(radius: 6)
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    if let episodeTitle = audioVM.episode?.title {
+                        Text(episodeTitle)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
                     }
                 }
+                
+                Spacer()
+                
+                HStack(spacing: 24) {
+                    Button(action: {
+                        audioVM.skipBackward()
+                    }) {
+                        Image(systemName: "gobackward")
+                            .foregroundColor(.primary)
+                    }
+                    
+                    Button(action: {
+                        audioVM.togglePlayPause()
+                    }) {
+                        Image(systemName: audioVM.isPlaying ? "pause.fill" : "play.fill")
+                            .foregroundColor(.primary)
+                            .font(.title)
+                    }
+                    
+                    Button(action: {
+                        audioVM.skipForward()
+                    }) {
+                        Image(systemName: "goforward")
+                            .foregroundColor(.primary)
+                    }
+                }
+            }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .background(Color(.systemGray6))
@@ -995,15 +1110,82 @@ struct LibraryView: View {
     }
 }
 
+//MARK: - QueueEpisodeRowView
+struct QueueEpisodeRowView: View {
+    let episode: Episode
+    let index: Int
+    let onPlayTapped: () -> Void
+    let onDeleteTapped: () -> Void
+    let onEpisodeTapped: () -> Void
+    
+    var body: some View {
+        EpisodeRowView(
+            episode: episode,
+            podcastImageURL: episode.podcastImageURL,
+            onPlayTapped: onPlayTapped
+        )
+        .padding(.vertical, 4)
+        .listRowSeparator(.visible)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onEpisodeTapped()
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                onDeleteTapped()
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .onDrag {
+            NSItemProvider(object: String(index) as NSString)
+        }
+    }
+}
+
 //MARK: - QueueView
 struct QueueView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @State private var isEditing = false
+    @State private var selectedEpisode: Episode?
     
     var body: some View {
         NavigationStack {
-            VStack {
-                if audioVM.episodeQueue.isEmpty {
+            VStack(spacing: 0) {
+                // Currently Playing Section
+                if let currentEpisode = audioVM.episode {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Now Playing")
+                                .font(.headline)
+                                .foregroundColor(.primary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        
+                        EpisodeRowView(
+                            episode: currentEpisode,
+                            podcastImageURL: audioVM.podcastImageURL,
+                            onPlayTapped: {
+                                audioVM.togglePlayPause()
+                            }
+                        )
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 8)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedEpisode = currentEpisode
+                        }
+                        
+                        Divider()
+                    }
+                    .background(Color(.systemGray6))
+                }
+                
+                // Queue Section
+                if audioVM.episodeQueue.isEmpty && audioVM.episode == nil {
+                    // Empty state
                     Spacer()
                     VStack {
                         Image(systemName: "text.badge.plus")
@@ -1017,55 +1199,37 @@ struct QueueView: View {
                     .multilineTextAlignment(.center)
                     .padding()
                     Spacer()
-                } else {
-                    List {
-                        ForEach(Array(audioVM.episodeQueue.enumerated()), id: \.element.id) { index, episode in
-                            HStack(spacing: 12) {
-                                
-                                AsyncImage(url: URL(string: episode.podcastImageURL ?? "")) { phase in
-                                    switch phase {
-                                    case .empty:
-                                        Color.gray
-                                            .frame(width: 60, height: 60)
-                                            .cornerRadius(8)
-                                    case .success(let image):
-                                        image
-                                            .resizable()
-                                            .scaledToFill()
-                                            .frame(width: 60, height: 60)
-                                            .cornerRadius(8)
-                                            .shadow(radius: 6)
-                                    case .failure:
-                                        Color.gray
-                                            .frame(width: 60, height: 60)
-                                            .cornerRadius(8)
-                                    @unknown default:
-                                        EmptyView()
-                                    }
-                                }
-                                
-                                Text(episode.title)
-                                    .font(.headline)
-                                    .lineLimit(2)
-                            }
-                            .padding(.vertical, 4)
-                            .contentShape(Rectangle())
-                            .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) {
-                                    audioVM.episodeQueue.removeAll { $0.id == episode.id }
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            }
-                            .onDrag {
-                                NSItemProvider(object: String(index) as NSString)
-                            }
-                        }
-                        .onMove(perform: moveEpisode)
-                        .moveDisabled(false)
+                } else if audioVM.episodeQueue.isEmpty {
+                    // Only show message if there's a current episode but no queue
+                    Spacer()
+                    VStack {
+                        Image(systemName: "text.badge.plus")
+                            .font(.system(size: 40))
+                            .foregroundColor(.gray)
+                            .padding(.bottom, 10)
+                        Text("Your queue is empty")
+                            .font(.title3)
+                            .foregroundColor(.gray)
+                        Text("Add more episodes to continue listening")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
                     }
-                    .listStyle(.plain)
-                    .environment(\.editMode, isEditing ? .constant(.active) : .constant(.inactive))
+                    .multilineTextAlignment(.center)
+                    .padding()
+                    Spacer()
+                } else {
+                    // Queue list
+                    VStack(alignment: .leading, spacing: 0) {
+                        queueHeaderView
+                        queueListView
+                    }
+                    .navigationDestination(item: $selectedEpisode) { episode in
+                        EpisodeDetailView(
+                            episode: episode,
+                            podcastTitle: episode.podcastName ?? "Unknown Podcast",
+                            podcastImageURL: episode.podcastImageURL
+                        )
+                    }
                 }
             }
             .navigationTitle("Queue")
@@ -1079,7 +1243,7 @@ struct QueueView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if !audioVM.episodeQueue.isEmpty {
-                        Button("Clear") {
+                        Button("Clear Queue") {
                             audioVM.episodeQueue.removeAll()
                         }
                         .foregroundColor(.red)
@@ -1091,6 +1255,41 @@ struct QueueView: View {
     
     private func moveEpisode(from source: IndexSet, to destination: Int) {
         audioVM.episodeQueue.move(fromOffsets: source, toOffset: destination)
+    }
+    
+    private var queueHeaderView: some View {
+        HStack {
+            Text("Up Next (\(audioVM.episodeQueue.count))")
+                .font(.headline)
+                .foregroundColor(.primary)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    private var queueListView: some View {
+        List {
+            ForEach(Array(audioVM.episodeQueue.enumerated()), id: \.element.id) { index, episode in
+                QueueEpisodeRowView(
+                    episode: episode,
+                    index: index,
+                    onPlayTapped: {
+                        audioVM.playFromQueue(episode)
+                    },
+                    onDeleteTapped: {
+                        audioVM.episodeQueue.removeAll { $0.id == episode.id }
+                    },
+                    onEpisodeTapped: {
+                        selectedEpisode = episode
+                    }
+                )
+            }
+            .onMove(perform: moveEpisode)
+            .moveDisabled(false)
+        }
+        .listStyle(.plain)
+        .environment(\.editMode, isEditing ? .constant(.active) : .constant(.inactive))
     }
 }
 
