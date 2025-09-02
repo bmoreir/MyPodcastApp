@@ -583,6 +583,7 @@ struct PodcastDetailView: View {
     @State private var hasLoadedEpisodes = false
     @State private var isLoadingEpisodes = false
     @State private var loadingError: String?
+    @State private var selectedEpisode: Episode? // Add this state variable
     @EnvironmentObject var libraryVM: LibraryViewModel
     
     var body: some View {
@@ -636,17 +637,22 @@ struct PodcastDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
             }
-            
             ForEach(episodes) { episode in
-                NavigationLink(destination: EpisodeDetailView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)) {
-                    EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
-                        .padding(.vertical, 4)
-                }
+                // Remove NavigationLink wrapper and use tap gesture instead
+                EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle()) // Makes the entire row tappable
+                    .onTapGesture {
+                        selectedEpisode = episode
+                    }
             }
         }
         .listStyle(.plain)
         .navigationTitle(podcast.collectionName)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(item: $selectedEpisode) { episode in // Add navigation destination
+            EpisodeDetailView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)
+        }
         .onAppear {
             if !hasLoadedEpisodes, let feedUrl = podcast.feedUrl {
                 fetchEpisodes(from: feedUrl)
@@ -690,12 +696,6 @@ struct EpisodeRowView: View {
     
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     
-    init(episode: Episode, podcastImageURL: String?, onPlayTapped: (() -> Void)? = nil) {
-        self.episode = episode
-        self.podcastImageURL = podcastImageURL
-        self.onPlayTapped = onPlayTapped
-    }
-    
     private var isCurrentlyPlaying: Bool {
         audioVM.episode?.id == episode.id && audioVM.isPlaying
     }
@@ -704,62 +704,56 @@ struct EpisodeRowView: View {
         audioVM.episode?.id == episode.id
     }
     
+    init(episode: Episode, podcastImageURL: String?, onPlayTapped: (() -> Void)? = nil) {
+        self.episode = episode
+        self.podcastImageURL = podcastImageURL
+        self.onPlayTapped = onPlayTapped ?? {
+            // Default behavior when no custom action is provided
+            if AudioPlayerViewModel.shared.episode?.id == episode.id {
+                AudioPlayerViewModel.shared.togglePlayPause()
+            } else {
+                AudioPlayerViewModel.shared.playNow(episode, podcastImageURL: podcastImageURL)
+            }
+        }
+    }
+    
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             AsyncImage(url: URL(string: episode.imageURL ?? podcastImageURL ?? "")) { image in
                 image.resizable().scaledToFill()
             } placeholder: {
                 Color.gray.opacity(0.3)
             }
-            .frame(width: 50, height: 50)
-            .cornerRadius(8)
-            .shadow(radius: 6)
+            .frame(width: 40, height: 40)
+            .cornerRadius(6)
+            .shadow(radius: 3)
             
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(episode.title)
-                    .font(.headline)
-                    .lineLimit(2)
-                    .foregroundColor(isCurrentEpisode ? .blue : .primary)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .foregroundColor(isCurrentEpisode ? .blue : .black)
                 
-                HStack(spacing: 8) {
-                    if let pubDate = episode.pubDate {
-                        Text(pubDate.formatted(date: .abbreviated, time: .omitted))
-                    }
-                    if let duration = episode.durationInMinutes {
-                        Text("• \(duration)")
-                    }
+                if let duration = episode.durationInMinutes {
+                    Text(duration)
+                        .font(.caption)
+                        .foregroundColor(.gray)
                 }
-                .font(.subheadline)
-                .foregroundColor(.gray)
             }
             
             Spacer()
             
-            // Play/Pause Button - CHANGED: Better alignment
-            VStack {
-                Spacer()
-                Button(action: {
-                    if let onPlayTapped = onPlayTapped {
-                        onPlayTapped()
-                    } else {
-                        // Default behavior
-                        if isCurrentEpisode {
-                            audioVM.togglePlayPause()
-                        } else {
-                            audioVM.playNow(episode, podcastImageURL: podcastImageURL)
-                        }
-                    }
-                }) {
-                    Image(systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill")
-                        .font(.title2)
-                        .foregroundColor(.blue)
-                        .frame(width: 44, height: 44)
-                }
-                .buttonStyle(PlainButtonStyle())
-                Spacer()
+            Button(action: {
+                onPlayTapped?()
+            }) {
+                Image(systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill")
+                    .font(.title3)
+                    .foregroundColor(.black)
             }
+            .buttonStyle(PlainButtonStyle())
         }
-        .frame(minHeight: 50) // ADDED: Ensure consistent row height
+        .frame(height: 40)
     }
 }
 
@@ -997,10 +991,7 @@ struct EpisodePlayerView: View {
                 Divider()
                 
                 if let desc = episode.description {
-                    Text(desc)
-                        .font(.body)
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    EpisodeDescriptionView(htmlString: desc)
                 }
             }
         }
@@ -1154,15 +1145,16 @@ struct QueueView: View {
             VStack(spacing: 0) {
                 // Currently Playing Section
                 if let currentEpisode = audioVM.episode {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Now Playing")
-                                .font(.headline)
-                                .foregroundColor(.primary)
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.secondary)
                             Spacer()
                         }
                         .padding(.horizontal, 16)
-                        .padding(.top, 8)
+                        .padding(.top, 6)
                         
                         EpisodeRowView(
                             episode: currentEpisode,
@@ -1172,7 +1164,7 @@ struct QueueView: View {
                             }
                         )
                         .padding(.horizontal, 16)
-                        .padding(.bottom, 8)
+                        .padding(.bottom, 6)
                         .contentShape(Rectangle())
                         .onTapGesture {
                             selectedEpisode = currentEpisode
@@ -1182,6 +1174,37 @@ struct QueueView: View {
                     }
                     .background(Color(.systemGray6))
                 }
+                /*
+                // Currently Playing Section
+                if let currentEpisode = audioVM.episode {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Now Playing")
+                                .font(.headline)
+                                .foregroundColor(.primary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 6)
+                        
+                        EpisodeRowView(
+                            episode: currentEpisode,
+                            podcastImageURL: audioVM.podcastImageURL,
+                            onPlayTapped: {
+                                audioVM.togglePlayPause()
+                            }
+                        )
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 6)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedEpisode = currentEpisode
+                        }
+                        
+                        Divider()
+                    }
+                    .background(Color(.systemGray6))
+                } */
                 
                 // Queue Section
                 if audioVM.episodeQueue.isEmpty && audioVM.episode == nil {
