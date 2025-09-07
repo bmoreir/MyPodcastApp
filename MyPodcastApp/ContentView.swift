@@ -35,8 +35,10 @@ struct Episode: Identifiable, Hashable {
     let podcastImageURL: String?
     let description: String?
     let podcastName: String?
+    let episodeNumber: String? // Add this new property
     
-    init(title: String, pubDate: Date?, audioURL: String, duration: String?, imageURL: String?, podcastImageURL: String?, description: String?, podcastName: String?) {
+    init(title: String, pubDate: Date?, audioURL: String, duration: String?, imageURL: String?, podcastImageURL: String?, description: String?, podcastName: String?, episodeNumber: String? = nil) {
+        self.id = audioURL
         self.id = audioURL
         self.title = title
         self.pubDate = pubDate
@@ -46,6 +48,7 @@ struct Episode: Identifiable, Hashable {
         self.podcastImageURL = podcastImageURL
         self.description = description
         self.podcastName = podcastName
+        self.episodeNumber = episodeNumber
     }
     
     var durationInMinutes: String? {
@@ -136,6 +139,7 @@ class RSSParser: NSObject, XMLParserDelegate {
     var insideItem = false
     var podcastImageURL = ""
     var podcastName = ""
+    var currentEpisodeNumber = "" // Add this
     
     func parse(data: Data) -> [Episode] {
         let parser = XMLParser(data: data)
@@ -154,6 +158,7 @@ class RSSParser: NSObject, XMLParserDelegate {
             duration = ""
             imageURL = ""
             currentDescription = ""
+            currentEpisodeNumber = "" // Reset episode number
         }
         if insideItem && elementName == "enclosure", let url = attributeDict["url"] {
             currentAudioURL = url
@@ -179,6 +184,9 @@ class RSSParser: NSObject, XMLParserDelegate {
         if currentElement == "description" {
             currentDescription += string
         }
+        if currentElement == "itunes:episode" { // Add this to capture episode numbers
+                    currentEpisodeNumber += string
+        }
         if !insideItem && currentElement == "title" {
             podcastName += string
         }
@@ -199,7 +207,8 @@ class RSSParser: NSObject, XMLParserDelegate {
                 imageURL: imageURL.isEmpty ? nil : imageURL,
                 podcastImageURL: podcastImageURL,
                 description: currentDescription.trimmingCharacters(in: .whitespacesAndNewlines),
-                podcastName: podcastName
+                podcastName: podcastName,
+                episodeNumber: currentEpisodeNumber.trimmingCharacters(in: .whitespacesAndNewlines) // Pass the episode number
             ))
             insideItem = false
         }
@@ -724,21 +733,42 @@ struct EpisodeRowView: View {
             } placeholder: {
                 Color.gray.opacity(0.3)
             }
-            .frame(width: 40, height: 40)
-            .cornerRadius(6)
-            .shadow(radius: 3)
+            .frame(width: 65, height: 65)
+            .cornerRadius(8)
+            .shadow(radius: 6)
             
             VStack(alignment: .leading, spacing: 1) {
+                
+                if let episodeNumber = episode.episodeNumber, !episodeNumber.isEmpty {
+                    Text("Episode \(episodeNumber)")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+                
                 Text(episode.title)
                     .font(.subheadline)
                     .fontWeight(.medium)
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .foregroundColor(isCurrentEpisode ? .blue : .black)
                 
-                if let duration = episode.durationInMinutes {
-                    Text(duration)
-                        .font(.caption)
-                        .foregroundColor(.gray)
+                HStack(spacing: 4) {
+                    if let pubDate = episode.pubDate {
+                        Text(pubDate.formatted(date: .abbreviated, time: .omitted))
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                    
+                    if episode.pubDate != nil && episode.durationInMinutes != nil {
+                        Text("•")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                    
+                    if let duration = episode.durationInMinutes {
+                        Text(duration)
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
                 }
             }
             
@@ -753,7 +783,7 @@ struct EpisodeRowView: View {
             }
             .buttonStyle(PlainButtonStyle())
         }
-        .frame(height: 40)
+        .frame(height: 70)
     }
 }
 
