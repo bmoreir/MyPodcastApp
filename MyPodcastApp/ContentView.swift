@@ -35,7 +35,7 @@ struct Episode: Identifiable, Hashable {
     let podcastImageURL: String?
     let description: String?
     let podcastName: String?
-    let episodeNumber: String? // Add this new property
+    let episodeNumber: String?
     
     init(title: String, pubDate: Date?, audioURL: String, duration: String?, imageURL: String?, podcastImageURL: String?, description: String?, podcastName: String?, episodeNumber: String? = nil) {
         self.id = audioURL
@@ -139,7 +139,7 @@ class RSSParser: NSObject, XMLParserDelegate {
     var insideItem = false
     var podcastImageURL = ""
     var podcastName = ""
-    var currentEpisodeNumber = "" // Add this
+    var currentEpisodeNumber = ""
     
     func parse(data: Data) -> [Episode] {
         let parser = XMLParser(data: data)
@@ -158,7 +158,7 @@ class RSSParser: NSObject, XMLParserDelegate {
             duration = ""
             imageURL = ""
             currentDescription = ""
-            currentEpisodeNumber = "" // Reset episode number
+            currentEpisodeNumber = ""
         }
         if insideItem && elementName == "enclosure", let url = attributeDict["url"] {
             currentAudioURL = url
@@ -184,7 +184,7 @@ class RSSParser: NSObject, XMLParserDelegate {
         if currentElement == "description" {
             currentDescription += string
         }
-        if currentElement == "itunes:episode" { // Add this to capture episode numbers
+        if currentElement == "itunes:episode" {
                     currentEpisodeNumber += string
         }
         if !insideItem && currentElement == "title" {
@@ -208,7 +208,7 @@ class RSSParser: NSObject, XMLParserDelegate {
                 podcastImageURL: podcastImageURL,
                 description: currentDescription.trimmingCharacters(in: .whitespacesAndNewlines),
                 podcastName: podcastName,
-                episodeNumber: currentEpisodeNumber.trimmingCharacters(in: .whitespacesAndNewlines) // Pass the episode number
+                episodeNumber: currentEpisodeNumber.trimmingCharacters(in: .whitespacesAndNewlines)
             ))
             insideItem = false
         }
@@ -248,7 +248,6 @@ class AudioPlayerViewModel: ObservableObject {
     }
     
     deinit {
-        // Clean up observers directly in deinit to avoid actor isolation issues
         if let observer = playerItemObserver {
             NotificationCenter.default.removeObserver(observer)
             playerItemObserver = nil
@@ -261,7 +260,7 @@ class AudioPlayerViewModel: ObservableObject {
     }
     
     func load(episode: Episode, podcastImageURL: String? = nil) {
-        cleanupObservers() // ADD THIS LINE FIRST
+        cleanupObservers()
         
         if self.episode?.audioURL == episode.audioURL { return }
         
@@ -278,7 +277,6 @@ class AudioPlayerViewModel: ObservableObject {
         updateDurationFromAsset(asset)
         self.isPlaying = false
         
-        // Store reference and add observer with proper cleanup
         currentPlayerItem = playerItem
         playerItemObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -409,7 +407,6 @@ class AudioPlayerViewModel: ObservableObject {
                 self.load(episode: nextEpisode, podcastImageURL: nextEpisode.podcastImageURL)
                 self.play()
             } else {
-                // Clear the currently playing episode when queue is empty
                 self.episode = nil
                 self.podcastImageURL = nil
                 self.player?.seek(to: .zero)
@@ -436,7 +433,6 @@ class AudioPlayerViewModel: ObservableObject {
     private func savePlaybackProgress() {
         if let current = self.episode {
             elapsedTimes[current.audioURL] = currentTime
-            //    saveElapsedTimes()
             saveTimer?.invalidate()
             saveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
                 Task {@MainActor in
@@ -452,10 +448,8 @@ class AudioPlayerViewModel: ObservableObject {
     }
     
     func playFromQueue(_ episode: Episode) {
-        // Remove episode from queue when it starts playing
         episodeQueue.removeAll { $0.id == episode.id }
         
-        // Load and play the episode
         load(episode: episode, podcastImageURL: episode.podcastImageURL)
         togglePlayPause()
     }
@@ -592,7 +586,7 @@ struct PodcastDetailView: View {
     @State private var hasLoadedEpisodes = false
     @State private var isLoadingEpisodes = false
     @State private var loadingError: String?
-    @State private var selectedEpisode: Episode? // Add this state variable
+    @State private var selectedEpisode: Episode?
     @EnvironmentObject var libraryVM: LibraryViewModel
     
     var body: some View {
@@ -647,10 +641,9 @@ struct PodcastDetailView: View {
                 .listRowSeparator(.hidden)
             }
             ForEach(episodes) { episode in
-                // Remove NavigationLink wrapper and use tap gesture instead
                 EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
                     .padding(.vertical, 4)
-                    .contentShape(Rectangle()) // Makes the entire row tappable
+                    .contentShape(Rectangle())
                     .onTapGesture {
                         selectedEpisode = episode
                     }
@@ -659,7 +652,7 @@ struct PodcastDetailView: View {
         .listStyle(.plain)
         .navigationTitle(podcast.collectionName)
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(item: $selectedEpisode) { episode in // Add navigation destination
+        .navigationDestination(item: $selectedEpisode) { episode in
             EpisodeDetailView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)
         }
         .onAppear {
@@ -717,7 +710,6 @@ struct EpisodeRowView: View {
         self.episode = episode
         self.podcastImageURL = podcastImageURL
         self.onPlayTapped = onPlayTapped ?? {
-            // Default behavior when no custom action is provided
             if AudioPlayerViewModel.shared.episode?.id == episode.id {
                 AudioPlayerViewModel.shared.togglePlayPause()
             } else {
@@ -1204,37 +1196,6 @@ struct QueueView: View {
                     }
                     .background(Color(.systemGray6))
                 }
-                /*
-                // Currently Playing Section
-                if let currentEpisode = audioVM.episode {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Now Playing")
-                                .font(.headline)
-                                .foregroundColor(.primary)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 6)
-                        
-                        EpisodeRowView(
-                            episode: currentEpisode,
-                            podcastImageURL: audioVM.podcastImageURL,
-                            onPlayTapped: {
-                                audioVM.togglePlayPause()
-                            }
-                        )
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 6)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedEpisode = currentEpisode
-                        }
-                        
-                        Divider()
-                    }
-                    .background(Color(.systemGray6))
-                } */
                 
                 // Queue Section
                 if audioVM.episodeQueue.isEmpty && audioVM.episode == nil {
@@ -1253,7 +1214,6 @@ struct QueueView: View {
                     .padding()
                     Spacer()
                 } else if audioVM.episodeQueue.isEmpty {
-                    // Only show message if there's a current episode but no queue
                     Spacer()
                     VStack {
                         Image(systemName: "text.badge.plus")
