@@ -491,7 +491,6 @@ class ImageCache {
     func getImage(for url: String) -> UIImage? {
         // Check memory cache first
         if let cachedImage = cache.object(forKey: url as NSString) {
-            print("✅ Found image in memory cache for: \(url)")
             return cachedImage
         }
         
@@ -501,12 +500,9 @@ class ImageCache {
         
         if let data = try? Data(contentsOf: fileURL),
            let image = UIImage(data: data) {
-            print("✅ Found image in disk cache for: \(url)")
-            // Store back in memory cache
             cache.setObject(image, forKey: url as NSString)
             return image
         }
-        print("❌ No cached image found for: \(url)")
         return nil
     }
 
@@ -1314,7 +1310,9 @@ struct PodcastDetailView: View {
                         
                         Button("Try Again") {
                             if let feedUrl = podcast.feedUrl {
-                                fetchEpisodes(from: feedUrl)
+                                Task {
+                                    await fetchEpisodes(from: feedUrl)
+                                }
                             }
                         }
                         .buttonStyle(.bordered)
@@ -1371,7 +1369,9 @@ struct PodcastDetailView: View {
         .onAppear {
             if !hasLoadedEpisodes {
                 if let feedUrl = podcast.feedUrl {
-                    fetchEpisodes(from: feedUrl)
+                    Task {
+                        await fetchEpisodes(from: feedUrl)
+                    }
                 } else {
                     loadingError = "This podcast doesn't have a valid RSS feed URL."
                     hasLoadedEpisodes = true
@@ -1380,67 +1380,69 @@ struct PodcastDetailView: View {
         }
     }
     
-    func fetchEpisodes(from feedUrl: String) {
+    func fetchEpisodes(from feedUrl: String) async {
         guard let url = URL(string: feedUrl) else {
             loadingError = "Invalid RSS feed URL."
+            hasLoadedEpisodes = true
             return
         }
         
         isLoadingEpisodes = true
         loadingError = nil
         
-        URLSession.shared.dataTask(with: url) { data, response, error in
-            DispatchQueue.main.async {
-                self.isLoadingEpisodes = false
-                self.hasLoadedEpisodes = true
-                
-                // Handle network errors
-                if let error = error {
-                    if (error as NSError).code == NSURLErrorNotConnectedToInternet {
-                        self.loadingError = "No internet connection. Please check your network and try again."
-                    } else if (error as NSError).code == NSURLErrorTimedOut {
-                        self.loadingError = "Request timed out. Please try again."
-                    } else {
-                        self.loadingError = "Network error: \(error.localizedDescription)"
-                    }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            
+            // Handle HTTP errors
+            if let httpResponse = response as? HTTPURLResponse {
+                if httpResponse.statusCode == 404 {
+                    isLoadingEpisodes = false
+                    hasLoadedEpisodes = true
+                    loadingError = "Podcast feed not found (404). This feed may have been moved or deleted."
                     return
-                }
-                
-                // Handle HTTP errors
-                if let httpResponse = response as? HTTPURLResponse {
-                    if httpResponse.statusCode == 404 {
-                        self.loadingError = "Podcast feed not found (404). This feed may have been moved or deleted."
-                        return
-                    } else if httpResponse.statusCode >= 400 {
-                        self.loadingError = "Server error (\(httpResponse.statusCode)). Please try again later."
-                        return
-                    }
-                }
-                
-                guard let data = data else {
-                    self.loadingError = "No data received from the podcast feed."
+                } else if httpResponse.statusCode >= 400 {
+                    isLoadingEpisodes = false
+                    hasLoadedEpisodes = true
+                    loadingError = "Server error (\(httpResponse.statusCode)). Please try again later."
                     return
-                }
-                
-                // Handle empty data
-                if data.isEmpty {
-                    self.loadingError = "The podcast feed is empty."
-                    return
-                }
-                
-                // Parse RSS data
-                let parser = RSSParser()
-                let parsedEpisodes = parser.parse(data: data)
-                
-                // Handle parsing results
-                if parsedEpisodes.isEmpty {
-                    self.loadingError = "Unable to parse episodes from this podcast feed. The feed may be malformed or in an unsupported format."
-                } else {
-                    self.episodes = parsedEpisodes
-                    print("Successfully loaded \(parsedEpisodes.count) episodes")
                 }
             }
-        }.resume()
+            
+            // Handle empty data
+            if data.isEmpty {
+                isLoadingEpisodes = false
+                hasLoadedEpisodes = true
+                loadingError = "The podcast feed is empty."
+                return
+            }
+            
+            // Parse RSS data (this happens on background thread automatically)
+            let parser = RSSParser()
+            let parsedEpisodes = parser.parse(data: data)
+            
+            // Update UI state
+            isLoadingEpisodes = false
+            hasLoadedEpisodes = true
+            
+            if parsedEpisodes.isEmpty {
+                loadingError = "Unable to parse episodes from this podcast feed. The feed may be malformed or in an unsupported format."
+            } else {
+                episodes = parsedEpisodes
+                print("Successfully loaded \(parsedEpisodes.count) episodes")
+            }
+            
+        } catch {
+            isLoadingEpisodes = false
+            hasLoadedEpisodes = true
+            
+            if (error as NSError).code == NSURLErrorNotConnectedToInternet {
+                loadingError = "No internet connection. Please check your network and try again."
+            } else if (error as NSError).code == NSURLErrorTimedOut {
+                loadingError = "Request timed out. Please try again."
+            } else {
+                loadingError = "Network error: \(error.localizedDescription)"
+            }
+        }
     }
 }
 
