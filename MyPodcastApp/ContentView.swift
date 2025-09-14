@@ -9,10 +9,12 @@ import SwiftUI
 import Foundation
 import AVFoundation
 import Combine
+import MediaPlayer
 
 
 //MARK: - Models
 
+//MARK: - Podcast
 struct Podcast: Identifiable, Codable {
     let id = UUID()
     let collectionName: String
@@ -25,6 +27,7 @@ struct Podcast: Identifiable, Codable {
     }
 }
 
+//MARK: - Episode
 struct Episode: Identifiable, Hashable {
     var id: String
     var duration: String?
@@ -38,7 +41,6 @@ struct Episode: Identifiable, Hashable {
     let episodeNumber: String?
     
     init(title: String, pubDate: Date?, audioURL: String, duration: String?, imageURL: String?, podcastImageURL: String?, description: String?, podcastName: String?, episodeNumber: String? = nil) {
-        self.id = audioURL
         self.id = audioURL
         self.title = title
         self.pubDate = pubDate
@@ -73,7 +75,11 @@ struct Episode: Identifiable, Hashable {
         let minutes = roundedMinutes % 60
         
         if hours > 0 {
-            return "\(hours)h \(minutes)min"
+            if minutes == 0 {
+                return "\(hours)h"
+            } else {
+                return "\(hours)h \(minutes)min"
+            }
         } else {
             return "\(minutes)min"
         }
@@ -93,39 +99,6 @@ struct SearchResults: Decodable {
     let results: [Podcast]
 }
 
-
-//MARK: - ViewModels
-
-@MainActor
-class PodcastSearchViewModel: ObservableObject {
-    @Published var podcasts: [Podcast] = []
-    
-    func search(term: String){
-        let searchTerm = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let urlString = "https://itunes.apple.com/search?media=podcast&term=\(searchTerm)"
-        
-        guard let url = URL(string: urlString) else { return }
-        
-        URLSession.shared.dataTask(with: url) { data, _, error in
-            guard let data = data else {
-                print("No data or error: \(String(describing: error))")
-                return
-            }
-            
-            do {
-                let decoded = try JSONDecoder().decode(SearchResults.self, from: data)
-                DispatchQueue.main.async {
-                    self.podcasts = decoded.results
-                    print("Decoded \(decoded.results.count) podcasts")
-                }
-            } catch {
-                print("Failed to decode: \(error)")
-            }
-        }.resume()
-    }
-    
-}
-
 //MARK: - RSSParser
 class RSSParser: NSObject, XMLParserDelegate {
     var episodes: [Episode] = []
@@ -141,16 +114,50 @@ class RSSParser: NSObject, XMLParserDelegate {
     var podcastName = ""
     var currentEpisodeNumber = ""
     
+    private var parseError: Error?
+    private var foundValidItems = false
+    private var podcastNameSet = false
+
+    
     func parse(data: Data) -> [Episode] {
+        episodes.removeAll()
+        parseError = nil
+        foundValidItems = false
+        
+        podcastImageURL = ""
+        podcastName = ""
+        podcastNameSet = false  // Add this line
+        
         let parser = XMLParser(data: data)
         parser.delegate = self
-        parser.parse()
-        return episodes
+        
+        let success = parser.parse()
+        
+        if !success {
+            print("RSS Parser failed with error: \(parser.parserError?.localizedDescription ?? "Unknown error")")
+            return []
+        }
+        
+        if let error = parseError {
+            print("RSS Parser encountered error: \(error.localizedDescription)")
+            return []
+        }
+        
+        // Filter out episodes without audio URLs (essential for podcast episodes)
+        let validEpisodes = episodes.filter { !$0.audioURL.isEmpty }
+        
+        if validEpisodes.isEmpty && foundValidItems {
+            print("RSS Parser: Found items but none had valid audio URLs")
+        }
+        
+        return validEpisodes
     }
     
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String : String] = [:]) {
         currentElement = elementName
+        
         if elementName == "item" {
+            foundValidItems = true
             insideItem = true
             currentTitle = ""
             currentAudioURL = ""
@@ -160,58 +167,409 @@ class RSSParser: NSObject, XMLParserDelegate {
             currentDescription = ""
             currentEpisodeNumber = ""
         }
-        if insideItem && elementName == "enclosure", let url = attributeDict["url"] {
-            currentAudioURL = url
+        
+        // Handle audio enclosures
+        if insideItem && elementName == "enclosure" {
+            if let url = attributeDict["url"], let type = attributeDict["type"] {
+                // Check if it's an audio file
+                if type.hasPrefix("audio/") || url.contains(".mp3") || url.contains(".m4a") || url.contains(".wav") {
+                    currentAudioURL = url
+                }
+            }
         }
+        
+        // Handle iTunes image tags
         if elementName == "itunes:image", let href = attributeDict["href"] {
-            imageURL = href
-        }
-        if !insideItem && elementName == "itunes:image", let href = attributeDict["href"] {
-            podcastImageURL = href
+            if insideItem {
+                imageURL = href
+            } else {
+                podcastImageURL = href
+            }
         }
     }
     
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        if insideItem && currentElement == "title" {
-            currentTitle += string
-        }
-        if currentElement == "pubDate" {
-            currentPubDate += string
-        }
-        if currentElement == "itunes:duration" {
-            duration += string
-        }
-        if currentElement == "description" {
-            currentDescription += string
-        }
-        if currentElement == "itunes:episode" {
-                    currentEpisodeNumber += string
-        }
-        if !insideItem && currentElement == "title" {
-            podcastName += string
+        let trimmedString = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedString.isEmpty else { return }
+        
+        switch currentElement {
+        case "title":
+            if insideItem {
+                currentTitle += trimmedString
+            } else if !podcastNameSet {
+                podcastName += trimmedString
+                podcastNameSet = true
+            }
+        case "pubDate":
+            currentPubDate += trimmedString
+        case "itunes:duration":
+            duration += trimmedString
+        case "description", "itunes:summary":
+            if insideItem {
+                currentDescription += trimmedString
+            }
+        case "itunes:episode":
+            currentEpisodeNumber += trimmedString
+        default:
+            break
         }
     }
     
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         if elementName == "item" {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.dateFormat = "E, d MMM yyyy HH:mm:ss Z"
-            let trimmedDateString = currentPubDate.trimmingCharacters(in: .whitespacesAndNewlines)
-            let date = formatter.date(from: trimmedDateString)
-            episodes.append(Episode(
-                title: currentTitle.trimmingCharacters(in: .whitespacesAndNewlines),
-                pubDate: date,
-                audioURL: currentAudioURL,
-                duration: duration.trimmingCharacters(in: .whitespacesAndNewlines),
-                imageURL: imageURL.isEmpty ? nil : imageURL,
-                podcastImageURL: podcastImageURL,
-                description: currentDescription.trimmingCharacters(in: .whitespacesAndNewlines),
-                podcastName: podcastName,
-                episodeNumber: currentEpisodeNumber.trimmingCharacters(in: .whitespacesAndNewlines)
-            ))
+            // Only add episode if it has essential data
+            if !currentTitle.isEmpty && !currentAudioURL.isEmpty {
+                let episode = createEpisode()
+                episodes.append(episode)
+            }
             insideItem = false
         }
+    }
+    
+    private func createEpisode() -> Episode {
+        // Parse the publication date with multiple format attempts
+    //    let pubDate = parseDate(from: currentPubDate.trimmingCharacters(in: .whitespacesAndNewlines))
+        let pubDate = RSSDateParser.parseDate(from: currentPubDate.trimmingCharacters(in: .whitespacesAndNewlines))
+        
+        return Episode(
+            title: currentTitle.trimmingCharacters(in: .whitespacesAndNewlines),
+            pubDate: pubDate,
+            audioURL: currentAudioURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            duration: duration.isEmpty ? nil : duration.trimmingCharacters(in: .whitespacesAndNewlines),
+            imageURL: imageURL.isEmpty ? nil : imageURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            podcastImageURL: podcastImageURL.isEmpty ? nil : podcastImageURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            description: currentDescription.isEmpty ? nil : currentDescription.trimmingCharacters(in: .whitespacesAndNewlines),
+            podcastName: podcastName.isEmpty ? nil : podcastName.trimmingCharacters(in: .whitespacesAndNewlines),
+            episodeNumber: currentEpisodeNumber.isEmpty ? nil : currentEpisodeNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+    
+    // XMLParserDelegate error handling
+    func parser(_ parser: XMLParser, parseErrorOccurred parseError: Error) {
+        self.parseError = parseError
+        print("XML Parse Error: \(parseError.localizedDescription)")
+    }
+    
+    func parser(_ parser: XMLParser, validationErrorOccurred validationError: Error) {
+        print("XML Validation Error: \(validationError.localizedDescription)")
+    }
+}
+
+//MARK: - RSSDateParser
+struct RSSDateParser {
+    static func parseDate(from dateString: String) -> Date? {
+        guard !dateString.isEmpty else { return nil }
+        
+        let cleanedDateString = cleanDateString(dateString)
+        
+        // Try multiple date formats in order of most common to least common
+        let formatters = createDateFormatters()
+        
+        for formatter in formatters {
+            if let date = formatter.date(from: cleanedDateString) {
+                return date
+            }
+        }
+        
+        print("Failed to parse date: '\(dateString)' (cleaned: '\(cleanedDateString)')")
+        return nil
+    }
+    
+    private static func cleanDateString(_ dateString: String) -> String {
+        var cleaned = dateString.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Remove common problematic characters and patterns
+        cleaned = cleaned.replacingOccurrences(of: " +0000", with: " GMT")
+        cleaned = cleaned.replacingOccurrences(of: " -0000", with: " GMT")
+        cleaned = cleaned.replacingOccurrences(of: "UT", with: "GMT")
+        
+        // Handle timezone abbreviations that DateFormatter doesn't recognize
+        let timezoneReplacements = [
+            " PDT": " -0700",
+            " PST": " -0800",
+            " EDT": " -0400",
+            " EST": " -0500",
+            " CDT": " -0500",
+            " CST": " -0600",
+            " MDT": " -0600",
+            " MST": " -0700"
+        ]
+        
+        for (abbrev, offset) in timezoneReplacements {
+            cleaned = cleaned.replacingOccurrences(of: abbrev, with: offset)
+        }
+        
+        // Remove duplicate spaces
+        cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
+        
+        return cleaned
+    }
+    
+    private static func createDateFormatters() -> [DateFormatter] {
+        let formats = [
+            // RFC 2822 formats (most common in RSS)
+            "E, d MMM yyyy HH:mm:ss Z",
+            "E, dd MMM yyyy HH:mm:ss Z",
+            "E, d MMM yyyy HH:mm:ss z",
+            "E, dd MMM yyyy HH:mm:ss z",
+            "E, d MMM yyyy HH:mm:ss 'GMT'",
+            "E, dd MMM yyyy HH:mm:ss 'GMT'",
+            
+            // Without day of week
+            "d MMM yyyy HH:mm:ss Z",
+            "dd MMM yyyy HH:mm:ss Z",
+            "d MMM yyyy HH:mm:ss z",
+            "dd MMM yyyy HH:mm:ss z",
+            
+            // Without seconds
+            "E, d MMM yyyy HH:mm Z",
+            "E, dd MMM yyyy HH:mm Z",
+            "d MMM yyyy HH:mm Z",
+            "dd MMM yyyy HH:mm Z",
+            
+            // Without timezone
+            "E, d MMM yyyy HH:mm:ss",
+            "E, dd MMM yyyy HH:mm:ss",
+            "d MMM yyyy HH:mm:ss",
+            "dd MMM yyyy HH:mm:ss",
+            "E, d MMM yyyy HH:mm",
+            "E, dd MMM yyyy HH:mm",
+            
+            // ISO 8601 variants
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ssZ",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm",
+            
+            // Alternative formats sometimes used
+            "yyyy-MM-dd HH:mm:ss Z",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd HH:mm",
+            "yyyy-MM-dd",
+            
+            // US format variations
+            "MM/dd/yyyy HH:mm:ss",
+            "MM/dd/yyyy HH:mm",
+            "MM/dd/yyyy",
+            "MM-dd-yyyy",
+            
+            // Other variations
+            "dd/MM/yyyy HH:mm:ss",
+            "dd/MM/yyyy HH:mm",
+            "dd/MM/yyyy",
+            "dd-MM-yyyy",
+            
+            // Fallback formats
+            "MMM d, yyyy HH:mm:ss",
+            "MMM d, yyyy HH:mm",
+            "MMM d, yyyy",
+            "MMMM d, yyyy",
+            "d MMMM yyyy"
+        ]
+        
+        return formats.map { format in
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = format
+            formatter.timeZone = TimeZone(secondsFromGMT: 0) // Default to GMT if no timezone
+            return formatter
+        }
+    }
+}
+
+// MARK: - Cached AsyncImage View
+struct CachedAsyncImage<Content: View, Placeholder: View>: View {
+    let url: URL?
+    let content: (Image) -> Content
+    let placeholder: () -> Placeholder
+    
+    @State private var cachedImage: UIImage?
+    @State private var shouldUseCached = false
+    
+    init(
+        url: URL?,
+        @ViewBuilder content: @escaping (Image) -> Content,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) {
+        self.url = url
+        self.content = content
+        self.placeholder = placeholder
+    }
+    
+    var body: some View {
+        Group {
+            if shouldUseCached, let cachedImage = cachedImage {
+                // Use cached image
+                content(Image(uiImage: cachedImage))
+            } else {
+                // Use AsyncImage and cache the result
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .empty:
+                        placeholder()
+                    case .success(let image):
+                        // Cache the successful image
+                        content(image)
+                            .onAppear {
+                                cacheImageFromAsyncImage()
+                            }
+                    case .failure(_):
+                        placeholder()
+                    @unknown default:
+                        placeholder()
+                    }
+                }
+            }
+        }
+        .onAppear {
+            checkCache()
+        }
+        .onChange(of: url) {
+                    // Reset state when URL changes
+                    shouldUseCached = false
+                    cachedImage = nil
+                    checkCache()
+                }
+    }
+    
+    private func checkCache() {
+        guard let url = url else { return }
+        
+        let urlString = url.absoluteString
+        if let cached = ImageCache.shared.getImage(for: urlString) {
+            cachedImage = cached
+            shouldUseCached = true
+        }
+    }
+    
+    private func cacheImageFromAsyncImage() {
+        guard let url = url else { return }
+        
+        // Download and cache in background
+        Task {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                if let image = UIImage(data: data) {
+                    await MainActor.run {
+                        ImageCache.shared.setImage(image, for: url.absoluteString)
+                    }
+                }
+            } catch {
+                // Ignore caching errors
+            }
+        }
+    }
+}
+
+// MARK: - ImageCache
+class ImageCache {
+    static let shared = ImageCache()
+    private var cache = NSCache<NSString, UIImage>()
+    private let fileManager = FileManager.default
+    private let cacheDirectory: URL
+    
+    private init() {
+        // Set up memory cache
+        cache.countLimit = 100 // Maximum 100 images in memory
+        cache.totalCostLimit = 50 * 1024 * 1024 // 50MB memory limit
+        
+        // Set up disk cache directory
+        let urls = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
+        cacheDirectory = urls[0].appendingPathComponent("PodcastImageCache")
+        
+        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+    }
+    
+    private func cacheFileName(for url: String) -> String {
+        return url.data(using: .utf8)?.base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-") ?? UUID().uuidString
+    }
+
+    func getImage(for url: String) -> UIImage? {
+        // Check memory cache first
+        if let cachedImage = cache.object(forKey: url as NSString) {
+            print("✅ Found image in memory cache for: \(url)")
+            return cachedImage
+        }
+        
+        // Check disk cache
+        let filename = cacheFileName(for: url)
+        let fileURL = cacheDirectory.appendingPathComponent(filename)
+        
+        if let data = try? Data(contentsOf: fileURL),
+           let image = UIImage(data: data) {
+            print("✅ Found image in disk cache for: \(url)")
+            // Store back in memory cache
+            cache.setObject(image, forKey: url as NSString)
+            return image
+        }
+        print("❌ No cached image found for: \(url)")
+        return nil
+    }
+
+    func setImage(_ image: UIImage, for url: String) {
+        // Store in memory cache
+        cache.setObject(image, forKey: url as NSString)
+        
+        // Store in disk cache
+        let filename = cacheFileName(for: url)
+        let fileURL = cacheDirectory.appendingPathComponent(filename)
+        
+        if let data = image.jpegData(compressionQuality: 0.8) {
+            try? data.write(to: fileURL)
+        }
+    }
+    
+    func clearCache() {
+        cache.removeAllObjects()
+        try? fileManager.removeItem(at: cacheDirectory)
+        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+    }
+}
+
+
+//MARK: - ViewModels
+
+//MARK: - PodcastSearchViewModel
+@MainActor
+class PodcastSearchViewModel: ObservableObject {
+    @Published var podcasts: [Podcast] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    
+    func search(term: String) async {
+        guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            podcasts = []
+            return
+        }
+        
+        let searchTerm = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let urlString = "https://itunes.apple.com/search?media=podcast&term=\(searchTerm)"
+        
+        guard let url = URL(string: urlString) else {
+            errorMessage = "Invalid search URL"
+            return
+        }
+        
+        isLoading = true
+        errorMessage = nil
+        
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(SearchResults.self, from: data)
+            
+            podcasts = decoded.results
+            print("Decoded \(decoded.results.count) podcasts")
+        } catch {
+            print("Search failed: \(error)")
+            errorMessage = "Search failed. Please try again."
+            podcasts = []
+        }
+        
+        isLoading = false
     }
 }
 
@@ -226,6 +584,8 @@ class AudioPlayerViewModel: ObservableObject {
     private var playerItemObserver: NSObjectProtocol?
     private var currentPlayerItem: AVPlayerItem?
     private var saveTimer: Timer?
+    private var audioSessionObserver: NSObjectProtocol?
+    private var routeChangeObserver: NSObjectProtocol?
     
     @Published var episode: Episode?
     @Published var isPlaying = false
@@ -234,6 +594,7 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var isPlayerSheetVisible: Bool = false
     @Published var podcastImageURL: String?
     @Published var episodeQueue: [Episode] = []
+    
     @Published private(set) var elapsedTimes: [String: Double] = [:]
     
     var showMiniPlayer: Bool {
@@ -245,18 +606,8 @@ class AudioPlayerViewModel: ObservableObject {
            let saved = try? JSONDecoder().decode([String: Double].self, from: data) {
             self.elapsedTimes = saved
         }
-    }
-    
-    deinit {
-        if let observer = playerItemObserver {
-            NotificationCenter.default.removeObserver(observer)
-            playerItemObserver = nil
-        }
-        currentPlayerItem = nil
         
-        if let token = timeObserverToken {
-            player?.removeTimeObserver(token)
-        }
+        configureAudioSession()
     }
     
     func load(episode: Episode, podcastImageURL: String? = nil) {
@@ -306,6 +657,8 @@ class AudioPlayerViewModel: ObservableObject {
             let cmTime = CMTime(seconds: savedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
             player?.seek(to: cmTime)
         }
+        
+        updateNowPlayingInfo()
     }
     
     @MainActor
@@ -323,10 +676,9 @@ class AudioPlayerViewModel: ObservableObject {
         
         let interval = CMTime(seconds: 1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self = self else { return }
-            
-            Task { @MainActor in
-                self.currentTime = time.seconds
+            DispatchQueue.main.async {
+                self?.currentTime = time.seconds
+                self?.savePlaybackProgress()
             }
         }
     }
@@ -342,6 +694,8 @@ class AudioPlayerViewModel: ObservableObject {
             player.play()
             isPlaying = true
         }
+        
+        updateNowPlayingInfo()
     }
     
     func skipForward(seconds: Double = 15) {
@@ -453,6 +807,226 @@ class AudioPlayerViewModel: ObservableObject {
         load(episode: episode, podcastImageURL: episode.podcastImageURL)
         togglePlayPause()
     }
+
+    // Add this method to configure the audio session - call it in init()
+    private func configureAudioSession() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // Set category for playback with ability to mix with other audio when needed
+            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [])
+            
+            // Activate the session
+            try audioSession.setActive(true)
+            
+            // Set up interruption handling
+            setupAudioSessionObservers()
+            
+            // Configure remote control events for lock screen/control center
+            setupRemoteTransportControls()
+            
+            print("Audio session configured successfully")
+        } catch {
+            print("Failed to configure audio session: \(error)")
+        }
+    }
+
+    private func setupAudioSessionObservers() {
+        let notificationCenter = NotificationCenter.default
+        
+        // Handle audio interruptions (calls, other audio apps)
+        audioSessionObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor in
+                self?.handleAudioSessionInterruption(notification)
+            }
+        }
+        
+        // Handle route changes (headphones plugged/unplugged, AirPods connection)
+        routeChangeObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor in
+                self?.handleAudioRouteChange(notification)
+            }
+        }
+    }
+
+    private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+        
+        switch type {
+        case .began:
+            // Interruption began (phone call, other audio app started)
+            if isPlaying {
+                player?.pause()
+                isPlaying = false
+                savePlaybackProgress()
+            }
+            
+        case .ended:
+            // Interruption ended
+            guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else {
+                return
+            }
+            
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+            if options.contains(.shouldResume) {
+                // Resume playback if the system suggests we should
+                // Note: You might want to add user preference for auto-resume
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.player?.play()
+                    self?.isPlaying = true
+                }
+            }
+            
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleAudioRouteChange(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
+            return
+        }
+        
+        switch reason {
+        case .oldDeviceUnavailable:
+            // Headphones were unplugged or AirPods disconnected
+            if isPlaying {
+                player?.pause()
+                isPlaying = false
+                savePlaybackProgress()
+            }
+            
+        case .newDeviceAvailable, .routeConfigurationChange:
+            // New audio device connected or route changed
+            // Usually no action needed, but you could add user preferences here
+            break
+            
+        case .unknown, .categoryChange, .override, .wakeFromSleep, .noSuitableRouteForCategory:
+                // Handle other route change reasons - typically no action needed
+                break
+            
+        @unknown default:
+            break
+        }
+    }
+
+    private func setupRemoteTransportControls() {
+        let commandCenter = MPRemoteCommandCenter.shared()
+        
+        // Enable/disable commands
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.skipForwardCommand.isEnabled = true
+        commandCenter.skipBackwardCommand.isEnabled = true
+        
+        // Configure skip intervals
+        commandCenter.skipForwardCommand.preferredIntervals = [NSNumber(value: 15)]
+        commandCenter.skipBackwardCommand.preferredIntervals = [NSNumber(value: 15)]
+        
+        // Add handlers
+        commandCenter.playCommand.addTarget { [weak self] _ in
+            if self?.player != nil {
+                self?.togglePlayPause()
+                return .success
+            }
+            return .commandFailed
+        }
+        
+        commandCenter.pauseCommand.addTarget { [weak self] _ in
+            if self?.isPlaying == true {
+                self?.togglePlayPause()
+                return .success
+            }
+            return .commandFailed
+        }
+        
+        commandCenter.skipForwardCommand.addTarget { [weak self] _ in
+            self?.skipForward()
+            return .success
+        }
+        
+        commandCenter.skipBackwardCommand.addTarget { [weak self] _ in
+            self?.skipBackward()
+            return .success
+        }
+    }
+
+    // Update the now playing info for lock screen/control center
+    private func updateNowPlayingInfo() {
+        guard let episode = episode else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
+        
+        var nowPlayingInfo: [String: Any] = [
+            MPMediaItemPropertyTitle: episode.title,
+            MPMediaItemPropertyArtist: episode.podcastName ?? "Unknown Podcast",
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
+            MPMediaItemPropertyPlaybackDuration: durationTime,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+        ]
+        
+        // Add artwork if available
+        if let imageURLString = episode.imageURL ?? podcastImageURL,
+           let imageURL = URL(string: imageURLString) {
+            
+            // In a production app, you'd want to cache this image
+            URLSession.shared.dataTask(with: imageURL) { data, _, _ in
+                if let data = data, let image = UIImage(data: data) {
+                    let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                    DispatchQueue.main.async {
+                        nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
+                        MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+                    }
+                }
+            }.resume()
+        }
+        
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+    }
+
+    // Update your existing deinit method
+    deinit {
+        // Remove observers
+        if let observer = audioSessionObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = routeChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        
+        // Remove remote command handlers
+        let commandCenter = MPRemoteCommandCenter.shared()
+        commandCenter.playCommand.removeTarget(nil)
+        commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.skipForwardCommand.removeTarget(nil)
+        commandCenter.skipBackwardCommand.removeTarget(nil)
+        
+        // Existing cleanup code...
+        if let observer = playerItemObserver {
+            NotificationCenter.default.removeObserver(observer)
+            playerItemObserver = nil
+        }
+        currentPlayerItem = nil
+        
+        if let token = timeObserverToken {
+            player?.removeTimeObserver(token)
+        }
+    }
 }
 
 //MARK: - LibraryViewModel
@@ -532,6 +1106,15 @@ struct ContentView: View {
         }
         .environmentObject(libraryVM)
         //      .animation(.easeInOut, value: audioVM.showMiniPlayer)
+        .sheet(isPresented: $audioVM.isPlayerSheetVisible) {
+            if let episode = audioVM.episode {
+                EpisodePlayerView(
+                    episode: episode,
+                    podcastTitle: episode.podcastName ?? "Unknown Podcast",
+                    podcastImageURL: audioVM.podcastImageURL
+                )
+            }
+        }
     }
 }
 
@@ -540,40 +1123,94 @@ struct SearchView: View {
     @StateObject var fetcher = PodcastSearchViewModel()
     @State private var searchText: String = ""
     
-    
     var body: some View {
         NavigationStack {
             VStack {
-                TextField("Search podcasts...", text: $searchText, onCommit: {
-                    fetcher.search(term: searchText)
-                })
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .padding()
+                TextField("Search podcasts...", text: $searchText)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .padding()
+                    .onSubmit {
+                        Task {
+                            await fetcher.search(term: searchText)
+                        }
+                    }
                 
-                List(fetcher.podcasts) { podcast in
-                    NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
-                        HStack {
-                            AsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
-                                image.resizable()
-                            } placeholder: {
-                                Color.gray
+                if fetcher.isLoading {
+                    HStack {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Searching...")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                    }
+                    .padding()
+                    Spacer()
+                } else if let errorMessage = fetcher.errorMessage {
+                    VStack {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.largeTitle)
+                            .foregroundColor(.orange)
+                            .padding(.bottom, 8)
+                        
+                        Text(errorMessage)
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                        
+                        Button("Try Again") {
+                            Task {
+                                await fetcher.search(term: searchText)
                             }
-                            .frame(width: 60, height: 60)
-                            .cornerRadius(8)
-                            .shadow(radius: 6)
-                            VStack(alignment: .leading) {
-                                Text(podcast.collectionName)
-                                    .font(.headline)
-                                Text(podcast.artistName)
-                                    .font(.subheadline)
-                                    .foregroundColor(.gray)
+                        }
+                        .buttonStyle(.bordered)
+                        .padding(.top, 8)
+                    }
+                    .padding()
+                    Spacer()
+                } else if fetcher.podcasts.isEmpty && !searchText.isEmpty {
+                    VStack {
+                        Image(systemName: "magnifyingglass")
+                            .font(.largeTitle)
+                            .foregroundColor(.gray)
+                            .padding(.bottom, 8)
+                        
+                        Text("No podcasts found")
+                            .font(.headline)
+                            .foregroundColor(.gray)
+                        
+                        Text("Try a different search term")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                    }
+                    .padding()
+                    Spacer()
+                } else {
+                    List(fetcher.podcasts) { podcast in
+                        NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
+                            HStack {
+                                CachedAsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
+                                    image.resizable()
+                                } placeholder: {
+                                    Color.gray
+                                }
+                                .frame(width: 60, height: 60)
+                                .cornerRadius(8)
+                                .shadow(radius: 6)
+                                
+                                VStack(alignment: .leading) {
+                                    Text(podcast.collectionName)
+                                        .font(.headline)
+                                    Text(podcast.artistName)
+                                        .font(.subheadline)
+                                        .foregroundColor(.gray)
+                                }
                             }
                         }
                     }
+                    .listStyle(.plain)
                 }
-                .listStyle(.plain)
             }
-            
             .navigationTitle("Search")
         }
     }
@@ -594,7 +1231,7 @@ struct PodcastDetailView: View {
             Section {
                 VStack(spacing: 12) {
                     if let imageUrl = URL(string: podcast.artworkUrl600) {
-                        AsyncImage(url: imageUrl) { image in
+                        CachedAsyncImage(url: imageUrl) { image in
                             image
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
@@ -640,13 +1277,89 @@ struct PodcastDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
             }
-            ForEach(episodes) { episode in
-                EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
-                    .padding(.vertical, 4)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        selectedEpisode = episode
+            
+            // Loading state
+            if isLoadingEpisodes {
+                Section {
+                    HStack {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Loading episodes...")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
                     }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding()
+                }
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+            }
+            // Error state
+            else if let error = loadingError {
+                Section {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.largeTitle)
+                            .foregroundColor(.orange)
+                        
+                        Text("Failed to Load Episodes")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        
+                        Text(error)
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                        
+                        Button("Try Again") {
+                            if let feedUrl = podcast.feedUrl {
+                                fetchEpisodes(from: feedUrl)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .padding(.top, 4)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                }
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+            }
+            // Empty state (no episodes found)
+            else if episodes.isEmpty && hasLoadedEpisodes {
+                Section {
+                    VStack(spacing: 12) {
+                        Image(systemName: "podcast")
+                            .font(.largeTitle)
+                            .foregroundColor(.gray)
+                        
+                        Text("No Episodes Available")
+                            .font(.headline)
+                            .foregroundColor(.gray)
+                        
+                        Text("This podcast feed doesn't contain any episodes or they couldn't be parsed.")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                }
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+            }
+            // Episodes list
+            else {
+                ForEach(episodes) { episode in
+                    EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedEpisode = episode
+                        }
+                }
             }
         }
         .listStyle(.plain)
@@ -656,15 +1369,22 @@ struct PodcastDetailView: View {
             EpisodeDetailView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)
         }
         .onAppear {
-            if !hasLoadedEpisodes, let feedUrl = podcast.feedUrl {
-                fetchEpisodes(from: feedUrl)
-                hasLoadedEpisodes = true
+            if !hasLoadedEpisodes {
+                if let feedUrl = podcast.feedUrl {
+                    fetchEpisodes(from: feedUrl)
+                } else {
+                    loadingError = "This podcast doesn't have a valid RSS feed URL."
+                    hasLoadedEpisodes = true
+                }
             }
         }
     }
     
     func fetchEpisodes(from feedUrl: String) {
-        guard let url = URL(string: feedUrl) else { return }
+        guard let url = URL(string: feedUrl) else {
+            loadingError = "Invalid RSS feed URL."
+            return
+        }
         
         isLoadingEpisodes = true
         loadingError = nil
@@ -672,19 +1392,53 @@ struct PodcastDetailView: View {
         URLSession.shared.dataTask(with: url) { data, response, error in
             DispatchQueue.main.async {
                 self.isLoadingEpisodes = false
+                self.hasLoadedEpisodes = true
                 
+                // Handle network errors
                 if let error = error {
-                    self.loadingError = error.localizedDescription
+                    if (error as NSError).code == NSURLErrorNotConnectedToInternet {
+                        self.loadingError = "No internet connection. Please check your network and try again."
+                    } else if (error as NSError).code == NSURLErrorTimedOut {
+                        self.loadingError = "Request timed out. Please try again."
+                    } else {
+                        self.loadingError = "Network error: \(error.localizedDescription)"
+                    }
                     return
+                }
+                
+                // Handle HTTP errors
+                if let httpResponse = response as? HTTPURLResponse {
+                    if httpResponse.statusCode == 404 {
+                        self.loadingError = "Podcast feed not found (404). This feed may have been moved or deleted."
+                        return
+                    } else if httpResponse.statusCode >= 400 {
+                        self.loadingError = "Server error (\(httpResponse.statusCode)). Please try again later."
+                        return
+                    }
                 }
                 
                 guard let data = data else {
-                    self.loadingError = "No data received"
+                    self.loadingError = "No data received from the podcast feed."
                     return
                 }
                 
+                // Handle empty data
+                if data.isEmpty {
+                    self.loadingError = "The podcast feed is empty."
+                    return
+                }
+                
+                // Parse RSS data
                 let parser = RSSParser()
-                self.episodes = parser.parse(data: data)
+                let parsedEpisodes = parser.parse(data: data)
+                
+                // Handle parsing results
+                if parsedEpisodes.isEmpty {
+                    self.loadingError = "Unable to parse episodes from this podcast feed. The feed may be malformed or in an unsupported format."
+                } else {
+                    self.episodes = parsedEpisodes
+                    print("Successfully loaded \(parsedEpisodes.count) episodes")
+                }
             }
         }.resume()
     }
@@ -720,7 +1474,7 @@ struct EpisodeRowView: View {
     
     var body: some View {
         HStack(spacing: 8) {
-            AsyncImage(url: URL(string: episode.imageURL ?? podcastImageURL ?? "")) { image in
+            CachedAsyncImage(url: URL(string: episode.imageURL ?? podcastImageURL ?? "")) { image in
                 image.resizable().scaledToFill()
             } placeholder: {
                 Color.gray.opacity(0.3)
@@ -798,19 +1552,17 @@ struct EpisodeDetailView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
-                if let imageURL = episode.imageURL ?? podcastImageURL,
-                   let url = URL(string: imageURL) {
-                    AsyncImage(url: url) { image in
-                        image.resizable()
+                    CachedAsyncImage(url: URL(string: episode.imageURL ?? podcastImageURL ?? "")) { image in
+                        image
+                            .resizable()
+                            .scaledToFill()
                     } placeholder: {
-                        Color.gray
+                        Color.gray.opacity(0.3)
                     }
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: 300)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .frame(width: 300, height: 300) // Adjust size
+                    .cornerRadius(16)
                     .shadow(radius: 6)
                     .padding(.top)
-                }
                 HStack(spacing: 8) {
                     if let pubDate = episode.pubDate {
                         Text(pubDate.formatted(date: .abbreviated, time: .omitted))
@@ -875,13 +1627,6 @@ struct EpisodeDetailView: View {
         }
         .navigationTitle("Episode")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $audioVM.isPlayerSheetVisible) {
-            EpisodePlayerView(
-                episode: episode,
-                podcastTitle: podcastTitle,
-                podcastImageURL: podcastImageURL
-            )
-        }
     }
 }
 
@@ -940,19 +1685,17 @@ struct EpisodePlayerView: View {
         }
         ScrollView {
             VStack(spacing: 10) {
-                if let imageURL = episode.imageURL ?? podcastImageURL,
-                   let url = URL(string: imageURL) {
-                    AsyncImage(url: url) { image in
-                        image.resizable()
-                    } placeholder: {
-                        Color.gray
-                    }
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: 300)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .shadow(radius: 6)
-                    .padding(.top)
+                CachedAsyncImage(url: URL(string: episode.imageURL ?? podcastImageURL ?? "")) { image in
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } placeholder: {
+                    Color.gray.opacity(0.3)
                 }
+                .frame(width: 300, height: 300) // Adjust size
+                .cornerRadius(16)
+                .shadow(radius: 6)
+                .padding(.top)
                 HStack(spacing: 8) {
                     if let pubDate = episode.pubDate {
                         Text(pubDate.formatted(date: .abbreviated, time: .omitted))
@@ -1031,7 +1774,7 @@ struct MiniPlayerView: View {
             HStack {
                 if let imageURL = audioVM.episode?.imageURL ?? audioVM.podcastImageURL,
                    let url = URL(string: imageURL) {
-                    AsyncImage(url: url) { image in
+                    CachedAsyncImage(url: url) { image in
                         image.resizable()
                     } placeholder: {
                         Color.gray
@@ -1084,7 +1827,11 @@ struct MiniPlayerView: View {
             .cornerRadius(12)
             .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 4)
             .onTapGesture {
+                print("Mini player tapped") // Add this line
+
                 audioVM.isPlayerSheetVisible = true
+                print("Sheet should show: \(audioVM.isPlayerSheetVisible)") // Add this line
+
             }
         }
     }
@@ -1099,7 +1846,7 @@ struct LibraryView: View {
             List(libraryVM.subscriptions) { podcast in
                 NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
                     HStack {
-                        AsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
+                        CachedAsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
                             image.resizable()
                         } placeholder: {
                             Color.gray
