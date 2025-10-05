@@ -257,55 +257,8 @@ class RSSParser: NSObject, XMLParserDelegate {
 
 //MARK: - RSSDateParser
 struct RSSDateParser {
-    static func parseDate(from dateString: String) -> Date? {
-        guard !dateString.isEmpty else { return nil }
-        
-        let cleanedDateString = cleanDateString(dateString)
-        
-        // Try multiple date formats in order of most common to least common
-        let formatters = createDateFormatters()
-        
-        for formatter in formatters {
-            if let date = formatter.date(from: cleanedDateString) {
-                return date
-            }
-        }
-        
-        print("Failed to parse date: '\(dateString)' (cleaned: '\(cleanedDateString)')")
-        return nil
-    }
-    
-    private static func cleanDateString(_ dateString: String) -> String {
-        var cleaned = dateString.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        // Remove common problematic characters and patterns
-        cleaned = cleaned.replacingOccurrences(of: " +0000", with: " GMT")
-        cleaned = cleaned.replacingOccurrences(of: " -0000", with: " GMT")
-        cleaned = cleaned.replacingOccurrences(of: "UT", with: "GMT")
-        
-        // Handle timezone abbreviations that DateFormatter doesn't recognize
-        let timezoneReplacements = [
-            " PDT": " -0700",
-            " PST": " -0800",
-            " EDT": " -0400",
-            " EST": " -0500",
-            " CDT": " -0500",
-            " CST": " -0600",
-            " MDT": " -0600",
-            " MST": " -0700"
-        ]
-        
-        for (abbrev, offset) in timezoneReplacements {
-            cleaned = cleaned.replacingOccurrences(of: abbrev, with: offset)
-        }
-        
-        // Remove duplicate spaces
-        cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
-        
-        return cleaned
-    }
-    
-    private static func createDateFormatters() -> [DateFormatter] {
+    // Cache formatters as static properties to avoid recreating them
+    private static let cachedFormatters: [DateFormatter] = {
         let formats = [
             // RFC 2822 formats (most common in RSS)
             "E, d MMM yyyy HH:mm:ss Z",
@@ -376,6 +329,74 @@ struct RSSDateParser {
             formatter.timeZone = TimeZone(secondsFromGMT: 0) // Default to GMT if no timezone
             return formatter
         }
+    }()
+    
+    // Add a cache for recently parsed dates to avoid re-parsing identical strings
+   // private static var dateCache = NSCache<NSString, NSDate>()
+    private static let dateCache: NSCache<NSString, NSDate> = {
+        let cache = NSCache<NSString, NSDate>()
+        cache.countLimit = 1000  // Limit cache size
+        cache.totalCostLimit = 1024 * 1024  // 1MB limit
+        return cache
+    }()
+    
+    static func parseDate(from dateString: String) -> Date? {
+        guard !dateString.isEmpty else { return nil }
+        
+        // Check cache first
+        let cacheKey = dateString as NSString
+        if let cachedDate = dateCache.object(forKey: cacheKey) {
+            return cachedDate as Date
+        }
+        
+        let cleanedDateString = cleanDateString(dateString)
+        
+        // Try the cached formatters in order of most common to least common
+        for formatter in cachedFormatters {
+            if let date = formatter.date(from: cleanedDateString) {
+                // Cache the successful parse
+                dateCache.setObject(date as NSDate, forKey: cacheKey)
+                return date
+            }
+        }
+        
+        print("Failed to parse date: '\(dateString)' (cleaned: '\(cleanedDateString)')")
+        return nil
+    }
+    
+    private static func cleanDateString(_ dateString: String) -> String {
+        var cleaned = dateString.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Remove common problematic characters and patterns
+        cleaned = cleaned.replacingOccurrences(of: " +0000", with: " GMT")
+        cleaned = cleaned.replacingOccurrences(of: " -0000", with: " GMT")
+        cleaned = cleaned.replacingOccurrences(of: "UT", with: "GMT")
+        
+        // Handle timezone abbreviations that DateFormatter doesn't recognize
+        let timezoneReplacements = [
+            " PDT": " -0700",
+            " PST": " -0800",
+            " EDT": " -0400",
+            " EST": " -0500",
+            " CDT": " -0500",
+            " CST": " -0600",
+            " MDT": " -0600",
+            " MST": " -0700"
+        ]
+        
+        for (abbrev, offset) in timezoneReplacements {
+            cleaned = cleaned.replacingOccurrences(of: abbrev, with: offset)
+        }
+        
+        // Remove duplicate spaces
+        cleaned = cleaned.replacingOccurrences(of: "  ", with: " ")
+        
+        return cleaned
+    }
+    
+    // Optional: Method to clear the date cache if memory becomes an issue
+    static func clearCache() {
+        dateCache.removeAllObjects()
     }
 }
 
@@ -526,6 +547,345 @@ class ImageCache {
     }
 }
 
+//MARK: - ListeningSession
+struct ListeningSession: Codable {
+    var id = UUID()
+    let episodeID: String
+    let podcastName: String
+    let episodeTitle: String
+    let startTime: Date
+    let endTime: Date
+    let duration: TimeInterval // in seconds
+    let completed: Bool // whether episode was finished
+}
+
+//MARK: - PodcastStats
+struct PodcastStats: Identifiable, Codable {
+    var id = UUID()
+    let podcastName: String
+    let totalListeningTime: TimeInterval
+    let episodeCount: Int
+    let averageListeningTime: TimeInterval
+    let completionRate: Double // percentage of episodes completed
+    let firstListenDate: Date
+    let lastListenDate: Date
+    
+ //   @MainActor
+    var totalListeningTimeFormatted: String {
+        return StatisticsManager.formatDuration(totalListeningTime)
+    }
+    
+//    @MainActor
+    var averageListeningTimeFormatted: String {
+        return StatisticsManager.formatDuration(averageListeningTime)
+    }
+}
+
+//MARK: - OverallStats
+struct OverallStats: Codable {
+    let totalListeningTime: TimeInterval
+    let totalEpisodes: Int
+    let totalPodcasts: Int
+    let averageSessionLength: TimeInterval
+    let longestSession: TimeInterval
+    let completionRate: Double
+    let firstListenDate: Date?
+    let streakDays: Int // consecutive days with listening
+    let favoriteListeningHour: Int // hour of day (0-23)
+    
+//    @MainActor
+    var totalListeningTimeFormatted: String {
+        return StatisticsManager.formatDuration(totalListeningTime)
+    }
+    
+//    @MainActor
+    var averageSessionLengthFormatted: String {
+        return StatisticsManager.formatDuration(averageSessionLength)
+    }
+    
+ //   @MainActor
+    var longestSessionFormatted: String {
+        return StatisticsManager.formatDuration(longestSession)
+    }
+}
+
+//MARK: - StatisticsManager
+//@MainActor
+class StatisticsManager: ObservableObject {
+    static let shared = StatisticsManager()
+    
+    @Published var overallStats: OverallStats?
+    @Published var podcastStats: [PodcastStats] = []
+    @Published var recentSessions: [ListeningSession] = []
+    
+    private var listeningSessions: [ListeningSession] = []
+    private var currentSessionStart: Date?
+    private var currentEpisode: Episode?
+    
+    private let sessionsKey = "listeningSessions"
+    private let minSessionDuration: TimeInterval = 5 // Minimum 30 seconds to count as a session
+    
+    private init() {
+        loadData()
+        calculateStats()
+    }
+    
+    func startListeningSession(for episode: Episode) {
+        // Don't start a new session if we already have one for the same episode
+        if let currentEpisode = currentEpisode,
+           currentEpisode.id == episode.id,
+           currentSessionStart != nil {
+            print("📊 Session already active for this episode, skipping")
+            return
+        }
+        
+        // End previous session if one exists for a different episode
+        if currentSessionStart != nil {
+            print("📊 Ending previous session before starting new one")
+            endListeningSession(completed: false)
+        }
+        
+        currentSessionStart = Date()
+        currentEpisode = episode
+        print("📊 ✅ Started session for: \(episode.title)")
+    }
+    
+    func endListeningSession(completed: Bool = false) {
+        guard let startTime = currentSessionStart,
+              let episode = currentEpisode else {
+            print("📊 ❌ No active session to end")
+            return
+        }
+        
+        let endTime = Date()
+        let duration = endTime.timeIntervalSince(startTime)
+        
+        print("📊 ⏹️ Ending session: \(duration) seconds, completed: \(completed)")
+        
+        // Lower the minimum duration for testing - change back to 30 later
+        let minDuration: TimeInterval = 5 // Changed from 30 to 5 for testing
+        
+        if duration >= minDuration {
+            let session = ListeningSession(
+                episodeID: episode.id,
+                podcastName: episode.podcastName ?? "Unknown Podcast",
+                episodeTitle: episode.title,
+                startTime: startTime,
+                endTime: endTime,
+                duration: duration,
+                completed: completed
+            )
+            
+            listeningSessions.append(session)
+            print("📊 ✅ Added session: \(session.episodeTitle) - \(duration)s")
+            print("📊 📈 Total sessions now: \(listeningSessions.count)")
+            saveData()
+            calculateStats()
+        } else {
+            print("📊 ❌ Session too short: \(duration)s < \(minDuration)s")
+        }
+        
+        currentSessionStart = nil
+        currentEpisode = nil
+    }
+    
+    func pauseSession() {
+        print("📊 Pausing session")
+
+        // When pausing, we end current session and will start new one on resume
+        endListeningSession()
+    }
+        
+    private func calculateStats() {
+  //      print("📊 Calculating stats with \(listeningSessions.count) sessions")
+
+        guard !listeningSessions.isEmpty else {
+            overallStats = nil
+            podcastStats = []
+            recentSessions = []
+    //        print("📊 No sessions - clearing stats")
+
+            return
+        }
+        
+        calculateOverallStats()
+        calculatePodcastStats()
+        updateRecentSessions()
+        
+        if let stats = overallStats {
+                print("📊 ✅ Stats calculated - Total time: \(stats.totalListeningTime)s, Episodes: \(stats.totalEpisodes)")
+            }
+    }
+    
+    private func calculateOverallStats() {
+        let totalTime = listeningSessions.reduce(0) { $0 + $1.duration }
+        let uniqueEpisodes = Set(listeningSessions.map { $0.episodeID }).count
+        let uniquePodcasts = Set(listeningSessions.map { $0.podcastName }).count
+        
+        let averageSession = totalTime / Double(listeningSessions.count)
+        let longestSession = listeningSessions.max { $0.duration < $1.duration }?.duration ?? 0
+        
+        let completedSessions = listeningSessions.filter { $0.completed }.count
+        let completionRate = Double(completedSessions) / Double(listeningSessions.count) * 100
+        
+        let firstListen = listeningSessions.min { $0.startTime < $1.startTime }?.startTime
+        
+        let streak = calculateStreak()
+        let favoriteHour = calculateFavoriteListeningHour()
+        
+        overallStats = OverallStats(
+            totalListeningTime: totalTime,
+            totalEpisodes: uniqueEpisodes,
+            totalPodcasts: uniquePodcasts,
+            averageSessionLength: averageSession,
+            longestSession: longestSession,
+            completionRate: completionRate,
+            firstListenDate: firstListen,
+            streakDays: streak,
+            favoriteListeningHour: favoriteHour
+        )
+    }
+    
+    private func calculatePodcastStats() {
+        let podcastGroups = Dictionary(grouping: listeningSessions, by: { $0.podcastName })
+        
+        podcastStats = podcastGroups.map { (podcastName, sessions) in
+            let totalTime = sessions.reduce(0) { $0 + $1.duration }
+            let episodeCount = Set(sessions.map { $0.episodeID }).count
+            let averageTime = totalTime / Double(sessions.count)
+            
+            let completed = sessions.filter { $0.completed }.count
+            let completionRate = Double(completed) / Double(sessions.count) * 100
+            
+            let firstListen = sessions.min { $0.startTime < $1.startTime }?.startTime ?? Date()
+            let lastListen = sessions.max { $0.startTime < $1.startTime }?.startTime ?? Date()
+            
+            return PodcastStats(
+                podcastName: podcastName,
+                totalListeningTime: totalTime,
+                episodeCount: episodeCount,
+                averageListeningTime: averageTime,
+                completionRate: completionRate,
+                firstListenDate: firstListen,
+                lastListenDate: lastListen
+            )
+        }.sorted { $0.totalListeningTime > $1.totalListeningTime }
+    }
+    
+    private func updateRecentSessions() {
+        recentSessions = Array(listeningSessions.suffix(20).reversed())
+  //      print("📊 📋 Updated recent sessions: \(recentSessions.count) sessions")
+  //          for (index, session) in recentSessions.prefix(3).enumerated() {
+  //              print("📊 📋 Session \(index): \(session.episodeTitle) - \(session.duration)s")
+  //          }
+    }
+    
+    private func calculateStreak() -> Int {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        
+        var streak = 0
+        var currentDate = today
+        
+        while true {
+            let hasListeningOnDate = listeningSessions.contains { session in
+                calendar.isDate(session.startTime, inSameDayAs: currentDate)
+            }
+            
+            if hasListeningOnDate {
+                streak += 1
+                currentDate = calendar.date(byAdding: .day, value: -1, to: currentDate) ?? currentDate
+            } else {
+                break
+            }
+        }
+        
+        return streak
+    }
+    
+    private func calculateFavoriteListeningHour() -> Int {
+        let hourGroups = Dictionary(grouping: listeningSessions) { session in
+            Calendar.current.component(.hour, from: session.startTime)
+        }
+        
+        return hourGroups.max { $0.value.count < $1.value.count }?.key ?? 12
+    }
+        
+    private func saveData() {
+        if let data = try? JSONEncoder().encode(listeningSessions) {
+            UserDefaults.standard.set(data, forKey: sessionsKey)
+        }
+    }
+    
+    private func loadData() {
+        if let data = UserDefaults.standard.data(forKey: sessionsKey),
+           let decoded = try? JSONDecoder().decode([ListeningSession].self, from: data) {
+            listeningSessions = decoded
+        }
+    }
+        
+    static func formatDuration(_ seconds: TimeInterval) -> String {
+        let hours = Int(seconds) / 3600
+        let minutes = Int(seconds) / 60 % 60
+        
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        } else {
+            return "\(minutes)m"
+        }
+    }
+    
+    static func formatLongDuration(_ seconds: TimeInterval) -> String {
+        let days = Int(seconds) / 86400
+        let hours = Int(seconds) / 3600 % 24
+        let minutes = Int(seconds) / 60 % 60
+        
+        if days > 0 {
+            return "\(days)d \(hours)h \(minutes)m"
+        } else if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        } else {
+            return "\(minutes)m"
+        }
+    }
+    
+    func getListeningTimeForPeriod(_ period: StatsPeriod) -> TimeInterval {
+        let calendar = Calendar.current
+        let now = Date()
+        
+        let startDate: Date
+        switch period {
+        case .today:
+            startDate = calendar.startOfDay(for: now)
+        case .thisWeek:
+            startDate = calendar.dateInterval(of: .weekOfYear, for: now)?.start ?? now
+        case .thisMonth:
+            startDate = calendar.dateInterval(of: .month, for: now)?.start ?? now
+        case .thisYear:
+            startDate = calendar.dateInterval(of: .year, for: now)?.start ?? now
+        case .allTime:
+            return listeningSessions.reduce(0) { $0 + $1.duration }
+        }
+        
+        return listeningSessions
+            .filter { $0.startTime >= startDate }
+            .reduce(0) { $0 + $1.duration }
+    }
+    
+    func clearAllStats() {
+        listeningSessions.removeAll()
+        saveData()
+        calculateStats()
+    }
+}
+
+enum StatsPeriod: String, CaseIterable {
+    case today = "Today"
+    case thisWeek = "This Week"
+    case thisMonth = "This Month"
+    case thisYear = "This Year"
+    case allTime = "All Time"
+}
 
 //MARK: - ViewModels
 
@@ -574,6 +934,7 @@ class PodcastSearchViewModel: ObservableObject {
 class AudioPlayerViewModel: ObservableObject {
     static let shared = AudioPlayerViewModel()
     private let elapsedTimesKey = "episodeElapsedTimes"
+    private let playbackSpeedKey = "playbackSpeed" //
     
     private var timeObserverToken: Any?
     private var player: AVPlayer?
@@ -590,6 +951,7 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var isPlayerSheetVisible: Bool = false
     @Published var podcastImageURL: String?
     @Published var episodeQueue: [Episode] = []
+    @Published var playbackSpeed: Float = 1.0 //
     
     @Published private(set) var elapsedTimes: [String: Double] = [:]
     
@@ -603,11 +965,17 @@ class AudioPlayerViewModel: ObservableObject {
             self.elapsedTimes = saved
         }
         
+        self.playbackSpeed = UserDefaults.standard.object(forKey: playbackSpeedKey) as? Float ?? 1.0 //
+        
         configureAudioSession()
+        setupAudioSessionObservers()
+        setupRemoteTransportControls()
+        
     }
     
     func load(episode: Episode, podcastImageURL: String? = nil) {
-        cleanupObservers()
+        // Clean up previous episode observers first
+        cleanupCurrentEpisodeObservers()
         
         if self.episode?.audioURL == episode.audioURL { return }
         
@@ -624,16 +992,8 @@ class AudioPlayerViewModel: ObservableObject {
         updateDurationFromAsset(asset)
         self.isPlaying = false
         
-        currentPlayerItem = playerItem
-        playerItemObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: playerItem,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.playerDidFinishPlaying()
-            }
-        }
+        // Set up new observers for this episode
+        setupPlayerItemObserver(for: playerItem)
         
         Task {
             do {
@@ -655,15 +1015,74 @@ class AudioPlayerViewModel: ObservableObject {
         }
         
         updateNowPlayingInfo()
+        StatisticsManager.shared.startListeningSession(for: episode)
+
     }
-    
+        
     @MainActor
-    private func cleanupObservers() {
+    private func cleanupCurrentEpisodeObservers() {
+        // Remove player item observer
         if let observer = playerItemObserver {
             NotificationCenter.default.removeObserver(observer)
             playerItemObserver = nil
         }
         currentPlayerItem = nil
+        
+        // Remove time observer
+        if let token = timeObserverToken, let player = player {
+            player.removeTimeObserver(token)
+            timeObserverToken = nil
+        }
+    }
+    
+    @MainActor
+    private func setupPlayerItemObserver(for playerItem: AVPlayerItem) {
+        currentPlayerItem = playerItem
+        playerItemObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.playerDidFinishPlaying()
+            }
+        }
+    }
+    
+    @MainActor
+    private func cleanupAllObservers() {
+        // Clean up current episode observers
+        cleanupCurrentEpisodeObservers()
+        
+        // Clean up audio session observers
+        if let observer = audioSessionObserver {
+            NotificationCenter.default.removeObserver(observer)
+            audioSessionObserver = nil
+        }
+        if let observer = routeChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            routeChangeObserver = nil
+        }
+        
+        // Clean up remote command handlers
+        let commandCenter = MPRemoteCommandCenter.shared()
+        commandCenter.playCommand.removeTarget(nil)
+        commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.skipForwardCommand.removeTarget(nil)
+        commandCenter.skipBackwardCommand.removeTarget(nil)
+        
+        // Clear now playing info
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+    
+    // Add a public method to clean up when needed (for testing or app shutdown)
+    func cleanup() {
+        StatisticsManager.shared.endListeningSession(completed: false)
+        cleanupAllObservers()
+        player?.pause()
+        player = nil
+        episode = nil
+        isPlaying = false
     }
     
     @MainActor
@@ -683,12 +1102,22 @@ class AudioPlayerViewModel: ObservableObject {
         guard let player = player else { return }
         
         if isPlaying {
+            print("📊 🔄 Pausing playback")
+
             player.pause()
             isPlaying = false
             savePlaybackProgress()
+            StatisticsManager.shared.pauseSession()
         } else {
-            player.play()
+            print("📊 ▶️ Starting playback")
+
+   //         player.play()
+            player.rate = playbackSpeed // Use the current speed setting
             isPlaying = true
+            
+            if let episode = episode {
+                        StatisticsManager.shared.startListeningSession(for: episode)
+            }
         }
         
         updateNowPlayingInfo()
@@ -747,7 +1176,10 @@ class AudioPlayerViewModel: ObservableObject {
     private func playerDidFinishPlaying() {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            
+            print("📊 🏁 Episode finished playing")
+
+            StatisticsManager.shared.endListeningSession(completed: true)
+
             self.isPlaying = false
             self.currentTime = 0
             self.isPlayerSheetVisible = false
@@ -757,6 +1189,8 @@ class AudioPlayerViewModel: ObservableObject {
                 self.load(episode: nextEpisode, podcastImageURL: nextEpisode.podcastImageURL)
                 self.play()
             } else {
+                // Clean up when playback ends and no queue
+                self.cleanupCurrentEpisodeObservers()
                 self.episode = nil
                 self.podcastImageURL = nil
                 self.player?.seek(to: .zero)
@@ -770,7 +1204,8 @@ class AudioPlayerViewModel: ObservableObject {
     }
     
     func play() {
-        player?.play()
+  //      player?.play()
+        player?.rate = playbackSpeed // Use the current speed setting
         isPlaying = true
     }
     
@@ -803,8 +1238,18 @@ class AudioPlayerViewModel: ObservableObject {
         load(episode: episode, podcastImageURL: episode.podcastImageURL)
         togglePlayPause()
     }
-
-    // Add this method to configure the audio session - call it in init()
+    
+    func setPlaybackSpeed(_ speed: Float) {
+        playbackSpeed = speed
+        player?.rate = isPlaying ? speed : 0
+        
+        // Save the speed setting
+        UserDefaults.standard.set(speed, forKey: playbackSpeedKey)
+        
+        // Update now playing info
+        updateNowPlayingInfo()
+    }
+    
     private func configureAudioSession() {
         do {
             let audioSession = AVAudioSession.sharedInstance()
@@ -814,12 +1259,6 @@ class AudioPlayerViewModel: ObservableObject {
             
             // Activate the session
             try audioSession.setActive(true)
-            
-            // Set up interruption handling
-            setupAudioSessionObservers()
-            
-            // Configure remote control events for lock screen/control center
-            setupRemoteTransportControls()
             
             print("Audio session configured successfully")
         } catch {
@@ -973,7 +1412,7 @@ class AudioPlayerViewModel: ObservableObject {
             MPMediaItemPropertyArtist: episode.podcastName ?? "Unknown Podcast",
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
             MPMediaItemPropertyPlaybackDuration: durationTime,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(playbackSpeed) : 0.0
         ]
         
         // Add artwork if available
@@ -993,35 +1432,32 @@ class AudioPlayerViewModel: ObservableObject {
         }
         
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+
     }
 
-    // Update your existing deinit method
+    // Keep deinit for completeness, though it won't be called for singleton
     deinit {
-        // Remove observers
         if let observer = audioSessionObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        if let observer = routeChangeObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        
-        // Remove remote command handlers
-        let commandCenter = MPRemoteCommandCenter.shared()
-        commandCenter.playCommand.removeTarget(nil)
-        commandCenter.pauseCommand.removeTarget(nil)
-        commandCenter.skipForwardCommand.removeTarget(nil)
-        commandCenter.skipBackwardCommand.removeTarget(nil)
-        
-        // Existing cleanup code...
-        if let observer = playerItemObserver {
-            NotificationCenter.default.removeObserver(observer)
-            playerItemObserver = nil
-        }
-        currentPlayerItem = nil
-        
-        if let token = timeObserverToken {
-            player?.removeTimeObserver(token)
-        }
+                   NotificationCenter.default.removeObserver(observer)
+               }
+               if let observer = routeChangeObserver {
+                   NotificationCenter.default.removeObserver(observer)
+               }
+               if let observer = playerItemObserver {
+                   NotificationCenter.default.removeObserver(observer)
+               }
+               
+               // Remove time observer
+               if let token = timeObserverToken, let player = player {
+                   player.removeTimeObserver(token)
+               }
+               
+               // Clean up remote command handlers
+               let commandCenter = MPRemoteCommandCenter.shared()
+               commandCenter.playCommand.removeTarget(nil)
+               commandCenter.pauseCommand.removeTarget(nil)
+               commandCenter.skipForwardCommand.removeTarget(nil)
+               commandCenter.skipBackwardCommand.removeTarget(nil)
     }
 }
 
@@ -1066,7 +1502,7 @@ class LibraryViewModel: ObservableObject {
 //MARK: - Views
 
 enum Tab {
-    case home, search, library, settings
+    case home, search, library, statistics, queue
 }
 
 //MARK: - ContentView
@@ -1077,23 +1513,37 @@ struct ContentView: View {
     
     var body: some View {
         ZStack(alignment: .bottom) {
-            TabView {
-                Text("Home").tabItem {
-                    Label("Home", systemImage: "house")
-                }
-                SearchView().tabItem {
-                    Label("Search", systemImage: "magnifyingglass")
-                }
-                LibraryView().tabItem {
-                    Label("Library", systemImage: "book.fill")
-                }
-                Text("Settings").tabItem {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                QueueView().tabItem {
-                    Label("Queue", systemImage: "text.badge.plus")
-                }
-            }
+            TabView(selection: $selectedTab) {
+                            HomeView()
+                                .tabItem {
+                                    Label("Home", systemImage: "house")
+                                }
+                                .tag(Tab.home)
+                            
+                            SearchView()
+                                .tabItem {
+                                    Label("Search", systemImage: "magnifyingglass")
+                                }
+                                .tag(Tab.search)
+                            
+                            LibraryView()
+                                .tabItem {
+                                    Label("Library", systemImage: "book.fill")
+                                }
+                                .tag(Tab.library)
+                            
+                            StatisticsView()
+                                .tabItem {
+                                    Label("Statistics", systemImage: "chart.bar.fill")
+                                }
+                                .tag(Tab.statistics)
+                            
+                            QueueView()
+                                .tabItem {
+                                    Label("Queue", systemImage: "text.badge.plus")
+                                }
+                                .tag(Tab.queue)
+                        }
             if audioVM.showMiniPlayer {
                 MiniPlayerView()
                     .transition(.move(edge: .bottom))
@@ -1109,6 +1559,91 @@ struct ContentView: View {
                     podcastTitle: episode.podcastName ?? "Unknown Podcast",
                     podcastImageURL: audioVM.podcastImageURL
                 )
+            }
+        }
+    }
+}
+
+//MARK: - HomeView
+struct HomeView: View {
+    @State private var showingSettings = false
+    @ObservedObject private var statsManager = StatisticsManager.shared
+    @EnvironmentObject var libraryVM: LibraryViewModel
+    
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) {
+                    // Welcome section
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Welcome to MyPodcastApp")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        if let stats = statsManager.overallStats {
+                            Text("You've listened to \(stats.totalListeningTimeFormatted) across \(stats.totalPodcasts) podcasts")
+                                .font(.subheadline)
+                                .foregroundColor(.gray)
+                        } else {
+                            Text("Start exploring podcasts to see your statistics")
+                                .font(.subheadline)
+                                .foregroundColor(.gray)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    
+                    // Recent subscriptions
+                    if !libraryVM.subscriptions.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Your Subscriptions")
+                                .font(.headline)
+                                .padding(.horizontal)
+                            
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                LazyHStack(spacing: 12) {
+                                    ForEach(libraryVM.subscriptions.prefix(5)) { podcast in
+                                        NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
+                                            VStack {
+                                                CachedAsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
+                                                    image.resizable()
+                                                } placeholder: {
+                                                    Color.gray
+                                                }
+                                                .frame(width: 120, height: 120)
+                                                .cornerRadius(12)
+                                                .shadow(radius: 4)
+                                                
+                                                Text(podcast.collectionName)
+                                                    .font(.caption)
+                                                    .lineLimit(2)
+                                                    .multilineTextAlignment(.center)
+                                                    .frame(width: 120)
+                                            }
+                                        }
+                                        .buttonStyle(PlainButtonStyle())
+                                    }
+                                }
+                                .padding(.horizontal)
+                            }
+                        }
+                    }
+                    
+                    Spacer()
+                }
+            }
+            .navigationTitle("Home")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: {
+                        showingSettings = true
+                    }) {
+                        Image(systemName: "gear")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView(isPresented: $showingSettings)
             }
         }
     }
@@ -1829,10 +2364,10 @@ struct MiniPlayerView: View {
             .cornerRadius(12)
             .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 4)
             .onTapGesture {
-                print("Mini player tapped") // Add this line
+   //             print("Mini player tapped") // Add this line
 
                 audioVM.isPlayerSheetVisible = true
-                print("Sheet should show: \(audioVM.isPlayerSheetVisible)") // Add this line
+    //            print("Sheet should show: \(audioVM.isPlayerSheetVisible)") // Add this line
 
             }
         }
@@ -2052,6 +2587,480 @@ struct QueueView: View {
         }
         .listStyle(.plain)
         .environment(\.editMode, isEditing ? .constant(.active) : .constant(.inactive))
+    }
+}
+
+// MARK: - StatisticsView
+struct StatisticsView: View {
+    @ObservedObject private var statsManager = StatisticsManager.shared
+    @State private var selectedPeriod: StatsPeriod = .allTime
+    @State private var selectedTab: StatsTab = .overview
+    
+    enum StatsTab: String, CaseIterable {
+        case overview = "Overview"
+        case podcasts = "Podcasts"
+        case sessions = "Sessions"
+    }
+    
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Period Picker
+                Picker("Period", selection: $selectedPeriod) {
+                    ForEach(StatsPeriod.allCases, id: \.self) { period in
+                        Text(period.rawValue).tag(period)
+                    }
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding()
+                
+                // Tab Picker
+                Picker("Tab", selection: $selectedTab) {
+                    ForEach(StatsTab.allCases, id: \.self) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding(.horizontal)
+                
+                // Content
+                TabView(selection: $selectedTab) {
+                    OverviewStatsView(period: selectedPeriod)
+                        .tag(StatsTab.overview)
+                    
+                    PodcastStatsView()
+                        .tag(StatsTab.podcasts)
+                    
+                    SessionsStatsView()
+                        .tag(StatsTab.sessions)
+                }
+                .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
+            }
+            .navigationTitle("Statistics")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu("More") {
+                        Button("Clear All Data", role: .destructive) {
+                            statsManager.clearAllStats()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - OverviewStatsView
+struct OverviewStatsView: View {
+    let period: StatsPeriod
+    @ObservedObject private var statsManager = StatisticsManager.shared
+    
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 16) {
+                if let stats = statsManager.overallStats {
+                    // Main Stats Cards
+                    StatsCardView(
+                        title: "Total Listening Time",
+                        value: period == .allTime ? stats.totalListeningTimeFormatted :
+                                StatisticsManager.formatLongDuration(statsManager.getListeningTimeForPeriod(period)),
+                        subtitle: period == .allTime ? "Since \(stats.firstListenDate?.formatted(date: .abbreviated, time: .omitted) ?? "Unknown")" : period.rawValue,
+                        icon: "clock.fill",
+                        color: .blue
+                    )
+                    
+                    HStack(spacing: 16) {
+                        StatsCardView(
+                            title: "Episodes",
+                            value: "\(stats.totalEpisodes)",
+                            subtitle: "Listened to",
+                            icon: "play.circle.fill",
+                            color: .green
+                        )
+                        
+                        StatsCardView(
+                            title: "Podcasts",
+                            value: "\(stats.totalPodcasts)",
+                            subtitle: "Different shows",
+                            icon: "mic.fill",
+                            color: .purple
+                        )
+                    }
+                    
+                    HStack(spacing: 16) {
+                        StatsCardView(
+                            title: "Avg Session",
+                            value: stats.averageSessionLengthFormatted,
+                            subtitle: "Per session",
+                            icon: "timer",
+                            color: .orange
+                        )
+                        
+                        StatsCardView(
+                            title: "Completion Rate",
+                            value: "\(Int(stats.completionRate))%",
+                            subtitle: "Episodes finished",
+                            icon: "checkmark.circle.fill",
+                            color: .green
+                        )
+                    }
+                    
+                    // Additional Stats
+                    VStack(spacing: 12) {
+                        StatsRowView(
+                            title: "Longest Session",
+                            value: stats.longestSessionFormatted,
+                            icon: "stopwatch"
+                        )
+                        
+                        StatsRowView(
+                            title: "Current Streak",
+                            value: "\(stats.streakDays) days",
+                            icon: "flame.fill"
+                        )
+                        
+                        StatsRowView(
+                            title: "Favorite Time",
+                            value: formatHour(stats.favoriteListeningHour),
+                            icon: "sun.max.fill"
+                        )
+                    }
+                    .padding()
+                    .background(Color(.systemGray6))
+                    .cornerRadius(12)
+                } else {
+                    // Empty state
+                    VStack(spacing: 16) {
+                        Image(systemName: "chart.bar")
+                            .font(.system(size: 50))
+                            .foregroundColor(.gray)
+                        
+                        Text("No Statistics Yet")
+                            .font(.title2)
+                            .foregroundColor(.gray)
+                        
+                        Text("Start listening to podcasts to see your statistics")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding()
+                }
+            }
+            .padding()
+        }
+    }
+    
+    private func formatHour(_ hour: Int) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        
+        var components = DateComponents()
+        components.hour = hour
+        components.minute = 0
+        
+        let calendar = Calendar.current
+        if let date = calendar.date(from: components) {
+            return formatter.string(from: date)
+        }
+        
+        return "\(hour):00"
+    }
+}
+
+// MARK: - PodcastStatsView
+struct PodcastStatsView: View {
+    @ObservedObject private var statsManager = StatisticsManager.shared
+    
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                if statsManager.podcastStats.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "mic")
+                            .font(.system(size: 50))
+                            .foregroundColor(.gray)
+                        
+                        Text("No Podcast Statistics")
+                            .font(.title2)
+                            .foregroundColor(.gray)
+                        
+                        Text("Listen to podcasts to see detailed statistics for each show")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding()
+                } else {
+                    ForEach(Array(statsManager.podcastStats.enumerated()), id: \.element.id) { index, podcastStat in
+                        PodcastStatsCardView(podcastStat: podcastStat, rank: index + 1)
+                    }
+                }
+            }
+            .padding()
+        }
+    }
+}
+
+// MARK: - SessionsStatsView
+struct SessionsStatsView: View {
+    @ObservedObject private var statsManager = StatisticsManager.shared
+    
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                Text("Sessions: \(statsManager.recentSessions.count)")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                if statsManager.recentSessions.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "list.bullet")
+                            .font(.system(size: 50))
+                            .foregroundColor(.gray)
+                        
+                        Text("No Sessions Yet")
+                            .font(.title2)
+                            .foregroundColor(.gray)
+                        
+                        Text("Your recent listening sessions will appear here")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding()
+                } else {
+                    ForEach(statsManager.recentSessions, id: \.id) { session in
+                        SessionRowView(session: session)
+                    }
+                }
+            }
+            .padding()
+        }
+    }
+}
+
+//MARK: - SettingsView
+struct SettingsView: View {
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    @ObservedObject private var statsManager = StatisticsManager.shared
+    @Binding var isPresented: Bool
+    
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Playback") {
+                    PlaybackSpeedSettingView()
+                }
+                
+                Section("Statistics") {
+                    Button("Clear All Statistics", role: .destructive) {
+                        statsManager.clearAllStats()
+                    }
+                }
+                
+                Section("Cache") {
+                    Button("Clear Image Cache") {
+                        ImageCache.shared.clearCache()
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        isPresented = false
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct PlaybackSpeedSettingView: View {
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    
+    private let speedOptions: [Float] = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Playback Speed")
+                .font(.headline)
+            
+            HStack(spacing: 12) {
+                ForEach(speedOptions, id: \.self) { speed in
+                    Button(action: {
+                        audioVM.setPlaybackSpeed(speed)
+                    }) {
+                        Text("\(speed, specifier: "%.2f")x")
+                            .font(.subheadline)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                audioVM.playbackSpeed == speed ? Color.blue : Color.gray.opacity(0.2)
+                            )
+                            .foregroundColor(
+                                audioVM.playbackSpeed == speed ? .white : .primary
+                            )
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+            }
+            
+            Text("Current: \(audioVM.playbackSpeed, specifier: "%.2f")x speed")
+                .font(.caption)
+                .foregroundColor(.gray)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Supporting Views
+
+struct StatsCardView: View {
+    let title: String
+    let value: String
+    let subtitle: String
+    let icon: String
+    let color: Color
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundColor(color)
+            
+            Text(value)
+                .font(.title2)
+                .fontWeight(.bold)
+            
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.gray)
+                .multilineTextAlignment(.center)
+            
+            Text(subtitle)
+                .font(.caption2)
+                .foregroundColor(.gray)
+        }
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+}
+
+struct StatsRowView: View {
+    let title: String
+    let value: String
+    let icon: String
+    
+    var body: some View {
+        HStack {
+            Image(systemName: icon)
+                .foregroundColor(.blue)
+                .frame(width: 20)
+            
+            Text(title)
+                .foregroundColor(.primary)
+            
+            Spacer()
+            
+            Text(value)
+                .foregroundColor(.gray)
+                .fontWeight(.medium)
+        }
+    }
+}
+
+struct PodcastStatsCardView: View {
+    let podcastStat: PodcastStats
+    let rank: Int
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("#\(rank)")
+                    .font(.caption)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.blue)
+                    .cornerRadius(8)
+                
+                VStack(alignment: .leading) {
+                    Text(podcastStat.podcastName)
+                        .font(.headline)
+                        .lineLimit(1)
+                    
+                    Text("\(podcastStat.episodeCount) episodes")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+                
+                Spacer()
+                
+                Text(podcastStat.totalListeningTimeFormatted)
+                    .font(.title3)
+                    .fontWeight(.bold)
+                    .foregroundColor(.blue)
+            }
+            
+            HStack {
+                Label(podcastStat.averageListeningTimeFormatted, systemImage: "clock")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                
+                Spacer()
+                
+                Label("\(Int(podcastStat.completionRate))%", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+}
+
+struct SessionRowView: View {
+    let session: ListeningSession
+    
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(session.episodeTitle)
+                    .font(.subheadline)
+                    .lineLimit(2)
+                
+                Text(session.podcastName)
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                
+                Text(session.startTime.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption2)
+                    .foregroundColor(.gray)
+            }
+            
+            Spacer()
+            
+            VStack(alignment: .trailing) {
+                Text(StatisticsManager.formatDuration(session.duration))
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                
+                if session.completed {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                }
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(8)
     }
 }
 
