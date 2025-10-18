@@ -29,7 +29,7 @@ struct Podcast: Identifiable, Codable {
 }
 
 //MARK: - Episode
-struct Episode: Identifiable, Hashable {
+struct Episode: Identifiable, Hashable, Codable {
     var id: String
     var duration: String?
     let title: String
@@ -40,6 +40,10 @@ struct Episode: Identifiable, Hashable {
     let description: String?
     let podcastName: String?
     let episodeNumber: String?
+    
+    enum CodingKeys: String, CodingKey {
+            case id, duration, title, pubDate, audioURL, imageURL, podcastImageURL, description, podcastName, episodeNumber
+        }
     
     init(title: String, pubDate: Date?, audioURL: String, duration: String?, imageURL: String?, podcastImageURL: String?, description: String?, podcastName: String?, episodeNumber: String? = nil) {
         self.id = audioURL
@@ -127,7 +131,7 @@ class RSSParser: NSObject, XMLParserDelegate {
         
         podcastImageURL = ""
         podcastName = ""
-        podcastNameSet = false  // Add this line
+        podcastNameSet = false
         
         let parser = XMLParser(data: data)
         parser.delegate = self
@@ -229,7 +233,6 @@ class RSSParser: NSObject, XMLParserDelegate {
     
     private func createEpisode() -> Episode {
         // Parse the publication date with multiple format attempts
-    //    let pubDate = parseDate(from: currentPubDate.trimmingCharacters(in: .whitespacesAndNewlines))
         let pubDate = RSSDateParser.parseDate(from: currentPubDate.trimmingCharacters(in: .whitespacesAndNewlines))
         
         return Episode(
@@ -333,7 +336,6 @@ struct RSSDateParser {
     }()
     
     // Add a cache for recently parsed dates to avoid re-parsing identical strings
-   // private static var dateCache = NSCache<NSString, NSDate>()
     private static let dateCache: NSCache<NSString, NSDate> = {
         let cache = NSCache<NSString, NSDate>()
         cache.countLimit = 1000  // Limit cache size
@@ -599,16 +601,10 @@ struct PodcastStats: Identifiable, Codable {
     let firstListenDate: Date
     let lastListenDate: Date
     
- //   @MainActor
     var totalListeningTimeFormatted: String {
         return DurationFormatter.formatDuration(totalListeningTime)
     }
-    /*
-    var totalListeningTimeFormatted: String {
-        return StatisticsManager.formatDuration(totalListeningTime)
-    } */
     
-//    @MainActor
     var averageListeningTimeFormatted: String {
         return StatisticsManager.formatDuration(averageListeningTime)
     }
@@ -626,28 +622,20 @@ struct OverallStats: Codable {
     let streakDays: Int // consecutive days with listening
     let favoriteListeningHour: Int // hour of day (0-23)
     
-//    @MainActor
     var totalListeningTimeFormatted: String {
         return DurationFormatter.formatDuration(totalListeningTime)
     }
-    /*
-    var totalListeningTimeFormatted: String {
-        return StatisticsManager.formatDuration(totalListeningTime)
-    } */
     
-//    @MainActor
     var averageSessionLengthFormatted: String {
         return StatisticsManager.formatDuration(averageSessionLength)
     }
     
- //   @MainActor
     var longestSessionFormatted: String {
         return StatisticsManager.formatDuration(longestSession)
     }
 }
 
 //MARK: - StatisticsManager
-//@MainActor
 class StatisticsManager: ObservableObject {
     static let shared = StatisticsManager()
     
@@ -660,7 +648,7 @@ class StatisticsManager: ObservableObject {
     private var currentEpisode: Episode?
     
     private let sessionsKey = "listeningSessions"
-    private let minSessionDuration: TimeInterval = 5 // Minimum 30 seconds to count as a session
+    private let minSessionDuration: TimeInterval = 30 // Minimum 30 seconds to count as a session
     
     private init() {
         loadData()
@@ -699,8 +687,7 @@ class StatisticsManager: ObservableObject {
         
   //      print("📊 ⏹️ Ending session: \(duration) seconds, completed: \(completed)")
         
-        // Lower the minimum duration for testing - change back to 30 later
-        let minDuration: TimeInterval = 5 // Changed from 30 to 5 for testing
+        let minDuration: TimeInterval = 30 // Changed from 30 to 5 for testing
         
         if duration >= minDuration {
             let session = ListeningSession(
@@ -1176,13 +1163,6 @@ class DownloadManager: NSObject, ObservableObject {
             try? fileManager.createDirectory(at: downloadsPath, withIntermediateDirectories: true)
         }
     }
-    /*
-    private func getDownloadPath(for episodeID: String) -> URL? {
-        guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        return documentsPath.appendingPathComponent("Downloads").appendingPathComponent("\(episodeID).mp3")
-    } */
     
     func isDownloaded(_ episodeID: String) -> Bool {
         return downloadedEpisodes.contains(episodeID)
@@ -1229,16 +1209,6 @@ class DownloadManager: NSObject, ObservableObject {
             print("🗑️ Deleted download for episode: \(episodeID)")
         }
     }
-    /*
-    func deleteDownload(_ episodeID: String) {
-        guard let downloadPath = getDownloadPath(for: episodeID) else { return }
-        
-        try? FileManager.default.removeItem(at: downloadPath)
-        downloadedEpisodes.remove(episodeID)
-        saveDownloadedEpisodes()
-        
-        print("Deleted download for episode: \(episodeID)")
-    } */
     
     func cancelDownload(_ episodeID: String) {
         if let task = downloadTasks[episodeID] {
@@ -1335,49 +1305,6 @@ extension DownloadManager: URLSessionDownloadDelegate {
             print("Error moving downloaded file: \(error)")
         }
     }
-    /*
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        Task {
-            guard let episodeID = await taskMapper.getEpisodeID(for: downloadTask),
-                  let destinationURL = await getDownloadPath(for: episodeID) else {
-                print("❌ Failed to get episodeID or destination path")
-
-                return
-            }
-            print("📥 Download finished for: \(episodeID)")
-                    print("📁 Moving from: \(location)")
-                    print("📁 Moving to: \(destinationURL)")
-            do {
-                if FileManager.default.fileExists(atPath: destinationURL.path) { //debugging
-                                try FileManager.default.removeItem(at: destinationURL)
-                                print("🗑️ Removed existing file at destination")
-                            }
-                
-                try FileManager.default.moveItem(at: location, to: destinationURL)
-                print("✅ File moved successfully")
-
-                // Verify file exists at new location debugging
-                            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                                print("✅ File verified at destination")
-                            } else {
-                                print("❌ File NOT found at destination after move")
-                            }
-                
-                await MainActor.run {
-                    self.downloadedEpisodes.insert(episodeID)
-                    self.activeDownloads.remove(episodeID)
-                    self.downloadProgress.removeValue(forKey: episodeID)
-                    self.downloadTasks.removeValue(forKey: episodeID)
-                    self.saveDownloadedEpisodes()
-                    print("Download completed: \(episodeID)")
-                }
-                
-                await taskMapper.removeEpisodeID(for: downloadTask)
-            } catch {
-                print("Error moving downloaded file: \(error)")
-            }
-        }
-    } */
     
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         Task {
@@ -1411,6 +1338,173 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 await taskMapper.removeEpisodeID(for: downloadTask)
             }
         }
+    }
+}
+
+//MARK: - EpisodeStatus
+struct EpisodeStatus: Codable {
+    var isPlayed: Bool = false
+    var isArchived: Bool = false
+    var lastPlayedDate: Date?
+    var playCount: Int = 0
+}
+
+//MARK: - EpisodeTrackingManager
+@MainActor
+class EpisodeTrackingManager: ObservableObject {
+    static let shared = EpisodeTrackingManager()
+    
+    @Published var episodeStatuses: [String: EpisodeStatus] = [:]
+    @Published var hidePlayedEpisodes: Bool = false
+    @Published var hideArchivedEpisodes: Bool = false
+    
+    private let statusesKey = "episodeStatuses"
+    private let hidePlayedKey = "hidePlayedEpisodes"
+    private let hideArchivedKey = "hideArchivedEpisodes"
+    
+    private init() {
+        loadStatuses()
+        loadPreferences()
+    }
+    
+    // MARK: - Status Management
+    
+    func markAsPlayed(_ episodeID: String) {
+        var status = episodeStatuses[episodeID] ?? EpisodeStatus()
+        status.isPlayed = true
+        status.isArchived = true // Marking played also archives
+        status.lastPlayedDate = Date()
+        status.playCount += 1
+        episodeStatuses[episodeID] = status
+        saveStatuses()
+    }
+    
+    func markAsUnplayed(_ episodeID: String) {
+        var status = episodeStatuses[episodeID] ?? EpisodeStatus()
+        status.isPlayed = false
+        // Note: Keep archived status as-is
+        episodeStatuses[episodeID] = status
+        saveStatuses()
+    }
+    
+    func toggleArchived(_ episodeID: String) {
+        var status = episodeStatuses[episodeID] ?? EpisodeStatus()
+        status.isArchived.toggle()
+        episodeStatuses[episodeID] = status
+        saveStatuses()
+    }
+    
+    func archive(_ episodeID: String) {
+        var status = episodeStatuses[episodeID] ?? EpisodeStatus()
+        status.isArchived = true
+        episodeStatuses[episodeID] = status
+        saveStatuses()
+    }
+    
+    func unarchive(_ episodeID: String) {
+        var status = episodeStatuses[episodeID] ?? EpisodeStatus()
+        status.isArchived = false
+        episodeStatuses[episodeID] = status
+        saveStatuses()
+    }
+    
+    // MARK: - Status Queries
+    
+    func isPlayed(_ episodeID: String) -> Bool {
+        return episodeStatuses[episodeID]?.isPlayed ?? false
+    }
+    
+    func isArchived(_ episodeID: String) -> Bool {
+        return episodeStatuses[episodeID]?.isArchived ?? false
+    }
+    
+    func shouldShowEpisode(_ episodeID: String) -> Bool {
+        let status = episodeStatuses[episodeID] ?? EpisodeStatus()
+        
+        if hideArchivedEpisodes && status.isArchived {
+            return false
+        }
+        
+        if hidePlayedEpisodes && status.isPlayed {
+            return false
+        }
+        
+        return true
+    }
+    
+    func getPlayCount(_ episodeID: String) -> Int {
+        return episodeStatuses[episodeID]?.playCount ?? 0
+    }
+    
+    func getLastPlayedDate(_ episodeID: String) -> Date? {
+        return episodeStatuses[episodeID]?.lastPlayedDate
+    }
+    
+    // MARK: - Preference Management
+    
+    func toggleHidePlayedEpisodes() {
+        hidePlayedEpisodes.toggle()
+        savePreferences()
+    }
+    
+    func toggleHideArchivedEpisodes() {
+        hideArchivedEpisodes.toggle()
+        savePreferences()
+    }
+    
+    // MARK: - Batch Operations
+    
+    func markAllAsPlayed(for episodes: [Episode]) {
+        for episode in episodes {
+            markAsPlayed(episode.id)
+        }
+    }
+    
+    func markAllAsUnplayed(for episodes: [Episode]) {
+        for episode in episodes {
+            markAsUnplayed(episode.id)
+        }
+    }
+    
+    func archiveAll(for episodes: [Episode]) {
+        for episode in episodes {
+            archive(episode.id)
+        }
+    }
+    
+    // MARK: - Persistence
+    
+    private func saveStatuses() {
+        if let data = try? JSONEncoder().encode(episodeStatuses) {
+            UserDefaults.standard.set(data, forKey: statusesKey)
+        }
+    }
+    
+    private func loadStatuses() {
+        if let data = UserDefaults.standard.data(forKey: statusesKey),
+           let decoded = try? JSONDecoder().decode([String: EpisodeStatus].self, from: data) {
+            episodeStatuses = decoded
+        }
+    }
+    
+    private func savePreferences() {
+        UserDefaults.standard.set(hidePlayedEpisodes, forKey: hidePlayedKey)
+        UserDefaults.standard.set(hideArchivedEpisodes, forKey: hideArchivedKey)
+    }
+    
+    private func loadPreferences() {
+        hidePlayedEpisodes = UserDefaults.standard.bool(forKey: hidePlayedKey)
+        hideArchivedEpisodes = UserDefaults.standard.bool(forKey: hideArchivedKey)
+    }
+    
+    // MARK: - Statistics
+    
+    func getTotalPlayedCount() -> Int {
+        return episodeStatuses.values.filter { $0.isPlayed }.count
+    }
+    
+    func getTotalArchivedCount() -> Int {
+        return episodeStatuses.values.filter { $0.isArchived }.count
     }
 }
 
@@ -1461,7 +1555,7 @@ class PodcastSearchViewModel: ObservableObject {
 class AudioPlayerViewModel: ObservableObject {
     static let shared = AudioPlayerViewModel()
     private let elapsedTimesKey = "episodeElapsedTimes"
-    private let playbackSpeedKey = "playbackSpeed" //
+    private let playbackSpeedKey = "playbackSpeed"
     
     private var timeObserverToken: Any?
     private var player: AVPlayer?
@@ -1478,7 +1572,7 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var isPlayerSheetVisible: Bool = false
     @Published var podcastImageURL: String?
     @Published var episodeQueue: [Episode] = []
-    @Published var playbackSpeed: Float = 1.0 //
+    @Published var playbackSpeed: Float = 1.0
     
     @Published private(set) var elapsedTimes: [String: Double] = [:]
     
@@ -1492,7 +1586,7 @@ class AudioPlayerViewModel: ObservableObject {
             self.elapsedTimes = saved
         }
         
-        self.playbackSpeed = UserDefaults.standard.object(forKey: playbackSpeedKey) as? Float ?? 1.0 //
+        self.playbackSpeed = UserDefaults.standard.object(forKey: playbackSpeedKey) as? Float ?? 1.0
         
         configureAudioSession()
         setupAudioSessionObservers()
@@ -1590,77 +1684,7 @@ class AudioPlayerViewModel: ObservableObject {
         StatisticsManager.shared.startListeningSession(for: episode)
         SessionManager.shared.startEpisodeInSession(episode: episode)
     }
-    
-    /*
-    func load(episode: Episode, podcastImageURL: String? = nil) {
-        // Clean up previous episode observers first
-        cleanupCurrentEpisodeObservers()
-        
-        if self.episode?.audioURL == episode.audioURL { return }
-        
-        self.episode = episode
-        self.podcastImageURL = podcastImageURL
-        
-        episodeQueue.removeAll { $0.id == episode.id }
-        
-        //    guard let url = URL(string: episode.audioURL) else { return }
-        // Check if episode is downloaded locally
-        let downloadManager = DownloadManager.shared
-        let audioURL: URL
-        
-        print("🎵 Loading episode: \(episode.title)")
-            print("📱 Episode ID: \(episode.id)")
-            print("🔍 Is downloaded: \(downloadManager.isDownloaded(episode.id))")
-        
-        if downloadManager.isDownloaded(episode.id),
-           let localURL = downloadManager.getLocalURL(for: episode.id) {
-            print("📁 Local URL: \(localURL)")
-            print("📁 File exists: \(FileManager.default.fileExists(atPath: localURL.path))")
-            audioURL = localURL
-            print("Playing from local download: \(episode.title)")
-        } else if let url = URL(string: episode.audioURL) {
-            audioURL = url
-            print("Streaming: \(episode.title)")
-        } else {
-        print("❌ No valid URL found")
-
-            return
-        }
-        
-        let asset = AVURLAsset(url: audioURL)
-        let playerItem = AVPlayerItem(asset: asset)
-        self.player = AVPlayer(playerItem: playerItem)
-        updateDurationFromAsset(asset)
-        self.isPlaying = false
-        
-        // Set up new observers for this episode
-        setupPlayerItemObserver(for: playerItem)
-        
-        Task {
-            do {
-                let duration = try await asset.load(.duration)
-                let seconds = CMTimeGetSeconds(duration)
-                if seconds.isFinite {
-                    self.durationTime = seconds
-                }
-            } catch {
-                print("Failed to load duration: \(error)")
-            }
-        }
-        
-        addPeriodicTimeObserver()
-        
-        if let savedTime = elapsedTimes[episode.audioURL], savedTime > 0 {
-            let cmTime = CMTime(seconds: savedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-            player?.seek(to: cmTime)
-        }
-        
-        updateNowPlayingInfo()
-        StatisticsManager.shared.startListeningSession(for: episode)
-        SessionManager.shared.startEpisodeInSession(episode: episode)
-
-    } */
-        
+            
     @MainActor
     private func cleanupCurrentEpisodeObservers() {
         // Remove player item observer
@@ -1820,10 +1844,13 @@ class AudioPlayerViewModel: ObservableObject {
     private func playerDidFinishPlaying() {
         Task { @MainActor [weak self] in
             guard let self else { return }
-    //        print("📊 🏁 Episode finished playing")
+            
+            if let episodeID = self.episode?.id {
+                        EpisodeTrackingManager.shared.markAsPlayed(episodeID)
+                    }
 
             StatisticsManager.shared.endListeningSession(completed: true)
-            SessionManager.shared.endCurrentEpisodeSession(completed: true) // ADD
+            SessionManager.shared.endCurrentEpisodeSession(completed: true)
 
             self.isPlaying = false
             self.currentTime = 0
@@ -1851,7 +1878,6 @@ class AudioPlayerViewModel: ObservableObject {
     }
     
     func play() {
-  //      player?.play()
         player?.rate = playbackSpeed // Use the current speed setting
         isPlaying = true
     }
@@ -1964,7 +1990,6 @@ class AudioPlayerViewModel: ObservableObject {
             let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
             if options.contains(.shouldResume) {
                 // Resume playback if the system suggests we should
-                // Note: You might want to add user preference for auto-resume
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     self?.player?.play()
                     self?.isPlaying = true
@@ -1994,7 +2019,6 @@ class AudioPlayerViewModel: ObservableObject {
             
         case .newDeviceAvailable, .routeConfigurationChange:
             // New audio device connected or route changed
-            // Usually no action needed, but you could add user preferences here
             break
             
         case .unknown, .categoryChange, .override, .wakeFromSleep, .noSuitableRouteForCategory:
@@ -2112,23 +2136,105 @@ class AudioPlayerViewModel: ObservableObject {
 @MainActor
 class LibraryViewModel: ObservableObject {
     @Published var subscriptions: [Podcast] = []
+    @Published var allEpisodes: [Episode] = []
+    @Published var isLoadingEpisodes = false
+    @Published var layoutStyle: LibraryLayoutStyle = .list
+    @Published var sortOrder: LibrarySortOrder = .dateAdded
+    @Published var showUnplayedBadges: Bool = true
     
     private let subscriptionsKey = "subscribedPodcasts"
+    private let layoutStyleKey = "libraryLayoutStyle"
+    private let sortOrderKey = "librarySortOrder"
+    private let showBadgesKey = "showUnplayedBadges"
+    private let allEpisodesKey = "allEpisodesCache"
     
     init() {
         loadSubscriptions()
+        loadPreferences()
+        loadAllEpisodes()
+            
+            // Refresh in background if we have subscriptions
+            if !subscriptions.isEmpty {
+                Task {
+                    await refreshAllEpisodes()
+                }
+            }
     }
     
     func subscribe(to podcast: Podcast) {
         if !subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
             subscriptions.append(podcast)
             saveSubscriptions()
+            Task {
+                await refreshAllEpisodes()
+            }
         }
     }
     
     func unsubscribe(from podcast: Podcast) {
         subscriptions.removeAll { $0.collectionName == podcast.collectionName }
         saveSubscriptions()
+        Task {
+            await refreshAllEpisodes()
+        }
+    }
+    
+    func refreshAllEpisodes() async {
+        guard !subscriptions.isEmpty else {
+            allEpisodes = []
+            saveAllEpisodes()
+            return
+        }
+        
+        isLoadingEpisodes = true
+        var episodes: [Episode] = []
+        
+        for podcast in subscriptions {
+            guard let feedUrl = podcast.feedUrl,
+                  let url = URL(string: feedUrl) else {
+                continue
+            }
+            
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                let parser = RSSParser()
+                let podcastEpisodes = parser.parse(data: data)
+                
+                // Add podcast info to episodes for display
+                let episodesWithPodcastInfo = podcastEpisodes.map { episode in
+                    Episode(
+                        title: episode.title,
+                        pubDate: episode.pubDate,
+                        audioURL: episode.audioURL,
+                        duration: episode.duration,
+                        imageURL: episode.imageURL,
+                        podcastImageURL: podcast.artworkUrl600,
+                        description: episode.description,
+                        podcastName: podcast.collectionName,
+                        episodeNumber: episode.episodeNumber
+                    )
+                }
+                
+                episodes.append(contentsOf: episodesWithPodcastInfo)
+            } catch {
+                print("Failed to fetch episodes for \(podcast.collectionName): \(error)")
+            }
+        }
+        
+        allEpisodes = episodes
+        isLoadingEpisodes = false
+        saveAllEpisodes()
+    }
+    
+    var recentEpisodes: [Episode] {
+        let twoWeeksAgo = Calendar.current.date(byAdding: .day, value: -14, to: Date()) ?? Date()
+        
+        return allEpisodes
+            .filter { episode in
+                guard let pubDate = episode.pubDate else { return false }
+                return pubDate >= twoWeeksAgo
+            }
+            .sorted { ($0.pubDate ?? Date.distantPast) > ($1.pubDate ?? Date.distantPast) }
     }
     
     private func saveSubscriptions() {
@@ -2143,6 +2249,87 @@ class LibraryViewModel: ObservableObject {
             subscriptions = decoded
         }
     }
+    
+    private func saveAllEpisodes() {
+        if let data = try? JSONEncoder().encode(allEpisodes) {
+            UserDefaults.standard.set(data, forKey: allEpisodesKey)
+        }
+    }
+
+    private func loadAllEpisodes() {
+        if let data = UserDefaults.standard.data(forKey: allEpisodesKey),
+           let decoded = try? JSONDecoder().decode([Episode].self, from: data) {
+            allEpisodes = decoded
+        }
+    }
+    
+    var sortedSubscriptions: [Podcast] {
+        switch sortOrder {
+        case .dateAdded:
+            return subscriptions // Keep original order (date added)
+        case .alphabetical:
+            return subscriptions.sorted { $0.collectionName.lowercased() < $1.collectionName.lowercased() }
+        }
+    }
+
+    func getUnplayedCount(for podcast: Podcast) -> Int {
+        let podcastEpisodes = allEpisodes.filter { $0.podcastName == podcast.collectionName }
+        let trackingManager = EpisodeTrackingManager.shared
+        return podcastEpisodes.filter { !trackingManager.isPlayed($0.id) }.count
+    }
+
+    func formatUnplayedCount(_ count: Int) -> String {
+        if count == 0 {
+            return ""
+        } else if count < 100 {
+            return "\(count)"
+        } else if count < 1000 {
+            return String(format: "%.1fk", Double(count) / 1000.0)
+        } else {
+            let thousands = count / 1000
+            return "\(thousands)k"
+        }
+    }
+
+    private func savePreferences() {
+        if let layoutData = try? JSONEncoder().encode(layoutStyle) {
+            UserDefaults.standard.set(layoutData, forKey: layoutStyleKey)
+        }
+        if let sortData = try? JSONEncoder().encode(sortOrder) {
+            UserDefaults.standard.set(sortData, forKey: sortOrderKey)
+        }
+        UserDefaults.standard.set(showUnplayedBadges, forKey: showBadgesKey)
+    }
+
+    private func loadPreferences() {
+        if let data = UserDefaults.standard.data(forKey: layoutStyleKey),
+           let decoded = try? JSONDecoder().decode(LibraryLayoutStyle.self, from: data) {
+            layoutStyle = decoded
+        }
+        if let data = UserDefaults.standard.data(forKey: sortOrderKey),
+           let decoded = try? JSONDecoder().decode(LibrarySortOrder.self, from: data) {
+            sortOrder = decoded
+        }
+        showUnplayedBadges = UserDefaults.standard.bool(forKey: showBadgesKey)
+        if UserDefaults.standard.object(forKey: showBadgesKey) == nil {
+            showUnplayedBadges = true // Default to true
+        }
+    }
+
+    func updateLayoutStyle(_ style: LibraryLayoutStyle) {
+        layoutStyle = style
+        savePreferences()
+    }
+
+    func updateSortOrder(_ order: LibrarySortOrder) {
+        sortOrder = order
+        savePreferences()
+    }
+
+    func toggleUnplayedBadges() {
+        showUnplayedBadges.toggle()
+        savePreferences()
+    }
 }
 
 
@@ -2150,6 +2337,30 @@ class LibraryViewModel: ObservableObject {
 
 enum Tab {
     case home, search, library, statistics, queue
+}
+
+enum LibraryLayoutStyle: String, Codable, CaseIterable {
+    case list = "List"
+    case grid = "Grid"
+    
+    var icon: String {
+        switch self {
+        case .list: return "list.bullet"
+        case .grid: return "square.grid.3x3"
+        }
+    }
+}
+
+enum LibrarySortOrder: String, Codable, CaseIterable {
+    case dateAdded = "Date Added"
+    case alphabetical = "Alphabetical"
+    
+    var icon: String {
+        switch self {
+        case .dateAdded: return "clock"
+        case .alphabetical: return "textformat"
+        }
+    }
 }
 
 //MARK: - ContentView
@@ -2402,7 +2613,15 @@ struct PodcastDetailView: View {
     @State private var isLoadingEpisodes = false
     @State private var loadingError: String?
     @State private var selectedEpisode: Episode?
+    @State private var showFilterOptions = false
     @EnvironmentObject var libraryVM: LibraryViewModel
+    @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
+    
+    var filteredEpisodes: [Episode] {
+        episodes.filter { episode in
+            trackingManager.shouldShowEpisode(episode.id)
+        }
+    }
     
     var body: some View {
         List {
@@ -2429,23 +2648,38 @@ struct PodcastDetailView: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal)
                     
-                    Text("\(episodes.count) episodes")
+                    Text("\(filteredEpisodes.count) of \(episodes.count) episodes")
                         .font(.subheadline)
                         .foregroundColor(.gray)
                     
-                    Button(action: {
-                        if libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
-                            libraryVM.unsubscribe(from: podcast)
-                        } else {
-                            libraryVM.subscribe(to: podcast)
+                    HStack(spacing: 12) {
+                        Button(action: {
+                            if libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
+                                libraryVM.unsubscribe(from: podcast)
+                            } else {
+                                libraryVM.subscribe(to: podcast)
+                            }
+                        }) {
+                            Text(libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) ? "Unsubscribe" : "Subscribe")
+                                .font(.subheadline)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.blue.opacity(0.1))
+                                .cornerRadius(8)
                         }
-                    }) {
-                        Text(libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) ? "Unsubscribe" : "Subscribe")
-                            .font(.subheadline)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.blue.opacity(0.1))
-                            .cornerRadius(8)
+                        .buttonStyle(PlainButtonStyle())
+                        
+                        Button(action: {
+                            showFilterOptions.toggle()
+                        }) {
+                            Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
+                                .font(.subheadline)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.gray.opacity(0.1))
+                                .cornerRadius(8)
+                        }
+                        .buttonStyle(PlainButtonStyle())
                     }
                     
                     Divider()
@@ -2456,7 +2690,25 @@ struct PodcastDetailView: View {
                 .listRowSeparator(.hidden)
             }
             
-            // Loading state
+            // Filter Options (when visible)
+            if showFilterOptions {
+                Section("Filter Options") {
+                    Toggle("Hide Played Episodes", isOn: $trackingManager.hidePlayedEpisodes)
+                    Toggle("Hide Archived Episodes", isOn: $trackingManager.hideArchivedEpisodes)
+                    
+                    if !episodes.isEmpty {
+                        Button("Mark All as Played") {
+                            trackingManager.markAllAsPlayed(for: episodes)
+                        }
+                        
+                        Button("Mark All as Unplayed") {
+                            trackingManager.markAllAsUnplayed(for: episodes)
+                        }
+                    }
+                }
+            }
+            
+            // Loading/Error/Empty states
             if isLoadingEpisodes {
                 Section {
                     HStack {
@@ -2472,7 +2724,6 @@ struct PodcastDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
             }
-            // Error state
             else if let error = loadingError {
                 Section {
                     VStack(spacing: 12) {
@@ -2506,23 +2757,33 @@ struct PodcastDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
             }
-            // Empty state (no episodes found)
-            else if episodes.isEmpty && hasLoadedEpisodes {
+            else if filteredEpisodes.isEmpty && hasLoadedEpisodes {
                 Section {
                     VStack(spacing: 12) {
-                        Image(systemName: "podcast")
+                        Image(systemName: episodes.isEmpty ? "podcast" : "eye.slash")
                             .font(.largeTitle)
                             .foregroundColor(.gray)
                         
-                        Text("No Episodes Available")
+                        Text(episodes.isEmpty ? "No Episodes Available" : "No Episodes to Show")
                             .font(.headline)
                             .foregroundColor(.gray)
                         
-                        Text("This podcast feed doesn't contain any episodes or they couldn't be parsed.")
+                        Text(episodes.isEmpty ?
+                            "This podcast feed doesn't contain any episodes or they couldn't be parsed." :
+                            "All episodes are hidden by your current filter settings.")
                             .font(.subheadline)
                             .foregroundColor(.gray)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal)
+                        
+                        if !episodes.isEmpty {
+                            Button("Show All Episodes") {
+                                trackingManager.hidePlayedEpisodes = false
+                                trackingManager.hideArchivedEpisodes = false
+                            }
+                            .buttonStyle(.bordered)
+                            .padding(.top, 4)
+                        }
                     }
                     .frame(maxWidth: .infinity)
                     .padding()
@@ -2530,15 +2791,15 @@ struct PodcastDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
             }
-            // Episodes list
             else {
-                ForEach(episodes) { episode in
+                ForEach(filteredEpisodes) { episode in
                     EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
                         .padding(.vertical, 4)
                         .contentShape(Rectangle())
                         .onTapGesture {
                             selectedEpisode = episode
                         }
+                        .episodeContextMenu(episode: episode)
                 }
             }
         }
@@ -2575,7 +2836,6 @@ struct PodcastDetailView: View {
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             
-            // Handle HTTP errors
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 404 {
                     isLoadingEpisodes = false
@@ -2590,7 +2850,6 @@ struct PodcastDetailView: View {
                 }
             }
             
-            // Handle empty data
             if data.isEmpty {
                 isLoadingEpisodes = false
                 hasLoadedEpisodes = true
@@ -2598,11 +2857,9 @@ struct PodcastDetailView: View {
                 return
             }
             
-            // Parse RSS data (this happens on background thread automatically)
             let parser = RSSParser()
             let parsedEpisodes = parser.parse(data: data)
             
-            // Update UI state
             isLoadingEpisodes = false
             hasLoadedEpisodes = true
             
@@ -2636,6 +2893,7 @@ struct EpisodeRowView: View {
     
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @ObservedObject private var downloadManager = DownloadManager.shared
+    @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
     
     private var isCurrentlyPlaying: Bool {
         audioVM.episode?.id == episode.id && audioVM.isPlaying
@@ -2667,9 +2925,9 @@ struct EpisodeRowView: View {
             .frame(width: 65, height: 65)
             .cornerRadius(8)
             .shadow(radius: 6)
+            .opacity(trackingManager.isPlayed(episode.id) ? 0.6 : 1.0)
             
             VStack(alignment: .leading, spacing: 1) {
-                
                 if let episodeNumber = episode.episodeNumber, !episodeNumber.isEmpty {
                     Text("Episode \(episodeNumber)")
                         .font(.caption2)
@@ -2680,16 +2938,27 @@ struct EpisodeRowView: View {
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .lineLimit(2)
-                    .foregroundColor(isCurrentEpisode ? .blue : .black)
+                    .foregroundColor(isCurrentEpisode ? .blue : (trackingManager.isPlayed(episode.id) ? .gray : .primary))
+                    .strikethrough(trackingManager.isPlayed(episode.id), color: .gray)
                 
-                if downloadManager.isDownloaded(episode.id) {
-                    HStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    // Status indicators
+                    if trackingManager.isPlayed(episode.id) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    }
+                    
+                    if trackingManager.isArchived(episode.id) && !trackingManager.isPlayed(episode.id) {
+                        Image(systemName: "archivebox.fill")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                    
+                    if downloadManager.isDownloaded(episode.id) {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.caption2)
-                            .foregroundColor(.green)
-                        Text("Downloaded")
-                            .font(.caption2)
-                            .foregroundColor(.green)
+                            .foregroundColor(.blue)
                     }
                 }
                 
@@ -2721,11 +2990,19 @@ struct EpisodeRowView: View {
             }) {
                 Image(systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill")
                     .font(.title3)
-                    .foregroundColor(.black)
+                    .foregroundColor(.primary)
             }
             .buttonStyle(PlainButtonStyle())
         }
         .frame(height: 70)
+        .swipeActions(edge: .leading) {
+                Button(action: {
+                    AudioPlayerViewModel.shared.addToQueue(episode)
+                }) {
+                    Label("Queue", systemImage: "text.badge.plus")
+                }
+                .tint(.blue)
+            }
     }
 }
 
@@ -2733,6 +3010,7 @@ struct EpisodeRowView: View {
 struct EpisodeDetailView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @ObservedObject private var downloadManager = DownloadManager.shared
+    @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
     
     let episode: Episode
     let podcastTitle: String
@@ -2773,6 +3051,39 @@ struct EpisodeDetailView: View {
                 .shadow(radius: 6)
                 .padding(.top)
                 
+                // Status badges
+                HStack(spacing: 8) {
+                    if trackingManager.isPlayed(episode.id) {
+                        Label("Played", systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.green.opacity(0.2))
+                            .foregroundColor(.green)
+                            .cornerRadius(8)
+                    }
+                    
+                    if trackingManager.isArchived(episode.id) {
+                        Label("Archived", systemImage: "archivebox.fill")
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.orange.opacity(0.2))
+                            .foregroundColor(.orange)
+                            .cornerRadius(8)
+                    }
+                    
+                    if isDownloaded {
+                        Label("Downloaded", systemImage: "arrow.down.circle.fill")
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.blue.opacity(0.2))
+                            .foregroundColor(.blue)
+                            .cornerRadius(8)
+                    }
+                }
+                
                 HStack(spacing: 8) {
                     if let pubDate = episode.pubDate {
                         Text(pubDate.formatted(date: .abbreviated, time: .omitted))
@@ -2812,6 +3123,7 @@ struct EpisodeDetailView: View {
                     }
                 }
                 
+                // First row of buttons
                 HStack(spacing: 12) {
                     // Queue Button
                     Button(action: {
@@ -2832,12 +3144,12 @@ struct EpisodeDetailView: View {
                     // Download Button
                     Button(action: {
                         if isDownloaded {
-                                downloadManager.deleteDownload(episode.id)
-                            } else if isDownloading {
-                                downloadManager.cancelDownload(episode.id)
-                            } else {
-                                downloadManager.downloadEpisode(episode)
-                            }
+                            downloadManager.deleteDownload(episode.id)
+                        } else if isDownloading {
+                            downloadManager.cancelDownload(episode.id)
+                        } else {
+                            downloadManager.downloadEpisode(episode)
+                        }
                     }) {
                         if isDownloading {
                             HStack {
@@ -2857,6 +3169,37 @@ struct EpisodeDetailView: View {
                     .tint(isDownloaded ? .red : .green)
                 }
                 
+                // Second row of buttons
+                HStack(spacing: 12) {
+                    // Mark Played/Unplayed Button
+                    Button(action: {
+                        if trackingManager.isPlayed(episode.id) {
+                            trackingManager.markAsUnplayed(episode.id)
+                        } else {
+                            trackingManager.markAsPlayed(episode.id)
+                        }
+                    }) {
+                        Label(
+                            trackingManager.isPlayed(episode.id) ? "Mark as Unplayed" : "Mark as Played",
+                            systemImage: trackingManager.isPlayed(episode.id) ? "circle" : "checkmark.circle.fill"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(trackingManager.isPlayed(episode.id) ? .gray : .green)
+                    
+                    // Archive/Unarchive Button
+                    Button(action: {
+                        trackingManager.toggleArchived(episode.id)
+                    }) {
+                        Label(
+                            trackingManager.isArchived(episode.id) ? "Unarchive" : "Archive",
+                            systemImage: trackingManager.isArchived(episode.id) ? "tray.and.arrow.up" : "archivebox"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(trackingManager.isArchived(episode.id) ? .blue : .orange)
+                }
+                
                 Divider()
                 
                 if let desc = episode.description {
@@ -2868,102 +3211,6 @@ struct EpisodeDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 }
-/*
-struct EpisodeDetailView: View {
-    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
-    
-    let episode: Episode
-    let podcastTitle: String
-    let podcastImageURL: String?
-    
-    var isCurrentlyPlaying: Bool {
-        audioVM.episode?.id == episode.id && audioVM.isPlaying
-    }
-    
-    var isInQueue: Bool {
-        audioVM.episodeQueue.contains(where: { $0.id == episode.id })
-    }
-    
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 10) {
-                    CachedAsyncImage(url: URL(string: episode.imageURL ?? podcastImageURL ?? "")) { image in
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } placeholder: {
-                        Color.gray.opacity(0.3)
-                    }
-                    .frame(width: 300, height: 300) // Adjust size
-                    .cornerRadius(16)
-                    .shadow(radius: 6)
-                    .padding(.top)
-                HStack(spacing: 8) {
-                    if let pubDate = episode.pubDate {
-                        Text(pubDate.formatted(date: .abbreviated, time: .omitted))
-                    } else {
-                        Text("Date not available")
-                    }
-                    if let duration = episode.durationInMinutes {
-                        Text("• \(duration)")
-                    }
-                }
-                .font(.subheadline)
-                .foregroundColor(.gray)
-                
-                Text(episode.title)
-                    .font(.title2)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-                
-                Text(podcastTitle)
-                    .font(.subheadline)
-                    .foregroundColor(.gray)
-                    .multilineTextAlignment(.center)
-                
-                ZStack {
-                    Button(action: {
-                        if audioVM.episode?.id == episode.id {
-                            audioVM.togglePlayPause()
-                        } else {
-                            audioVM.episodeQueue.removeAll { $0.id == episode.id }
-                            audioVM.playNow(episode, podcastImageURL: podcastImageURL)
-                        }
-                    }) {
-                        Image(systemName: isCurrentlyPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .resizable()
-                            .frame(width: 100, height: 100)
-                            .foregroundColor(.blue)
-                    }
-                }
-                
-                Button(action: {
-                    if isInQueue {
-                        audioVM.episodeQueue.removeAll { $0.id == episode.id }
-                    } else {
-                        audioVM.addToQueue(episode)
-                    }
-                }) {
-                    Label(
-                        isInQueue ? "Remove from Queue" : "Add to Queue",
-                        systemImage: isInQueue ? "text.badge.minus" : "text.badge.plus"
-                    )
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(isInQueue ? .red : .blue)
-                
-                Divider()
-                
-                if let desc = episode.description {
-                    EpisodeDescriptionView(htmlString: desc)
-                }
-                
-            }
-        }
-        .navigationTitle("Episode")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-} */
 
 //MARK: - EpisodeDescriptionView
 struct EpisodeDescriptionView: View {
@@ -3027,7 +3274,7 @@ struct EpisodePlayerView: View {
                 } placeholder: {
                     Color.gray.opacity(0.3)
                 }
-                .frame(width: 300, height: 300) // Adjust size
+                .frame(width: 300, height: 300)
                 .cornerRadius(16)
                 .shadow(radius: 6)
                 .padding(.top)
@@ -3162,11 +3409,107 @@ struct MiniPlayerView: View {
             .cornerRadius(12)
             .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 4)
             .onTapGesture {
-   //             print("Mini player tapped") // Add this line
-
                 audioVM.isPlayerSheetVisible = true
-    //            print("Sheet should show: \(audioVM.isPlayerSheetVisible)") // Add this line
+            }
+        }
+    }
+}
 
+//MARK: - PodcastGridItem
+struct PodcastGridItem: View {
+    let podcast: Podcast
+    let unplayedCount: Int
+    let showBadge: Bool
+    @EnvironmentObject var libraryVM: LibraryViewModel
+    
+    var body: some View {
+        NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
+            VStack(spacing: 4) {
+                ZStack(alignment: .topTrailing) {
+                    CachedAsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
+                        image
+                            .resizable()
+                            .scaledToFit()
+                    } placeholder: {
+                        Color.gray.opacity(0.3)
+                    }
+                    .aspectRatio(1, contentMode: .fit)
+                    .cornerRadius(8)
+                    .shadow(radius: 4)
+                    
+                    if showBadge && unplayedCount > 0 {
+                        Text(libraryVM.formatUnplayedCount(unplayedCount))
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.red)
+                            .cornerRadius(10)
+                            .offset(x: 4, y: -4)
+                    }
+                }
+                
+                Text(podcast.collectionName)
+                    .font(.caption)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(.primary)
+            }
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+}
+
+//MARK: - LibrarySettingsSheet
+struct LibrarySettingsSheet: View {
+    @EnvironmentObject var libraryVM: LibraryViewModel
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Layout") {
+                    Picker("Style", selection: $libraryVM.layoutStyle) {
+                        ForEach(LibraryLayoutStyle.allCases, id: \.self) { style in
+                            Label(style.rawValue, systemImage: style.icon)
+                                .tag(style)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: libraryVM.layoutStyle) { _, newValue in
+                        libraryVM.updateLayoutStyle(newValue)
+                    }
+                }
+                
+                Section("Sort Order") {
+                    Picker("Order", selection: $libraryVM.sortOrder) {
+                        ForEach(LibrarySortOrder.allCases, id: \.self) { order in
+                            Label(order.rawValue, systemImage: order.icon)
+                                .tag(order)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .onChange(of: libraryVM.sortOrder) { _, newValue in
+                        libraryVM.updateSortOrder(newValue)
+                    }
+                }
+                
+                Section("Display Options") {
+                    Toggle("Show Unplayed Count", isOn: $libraryVM.showUnplayedBadges)
+                        .onChange(of: libraryVM.showUnplayedBadges) { _, _ in
+                            libraryVM.toggleUnplayedBadges()
+                        }
+                }
+            }
+            .navigationTitle("Library Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
             }
         }
     }
@@ -3175,32 +3518,247 @@ struct MiniPlayerView: View {
 //MARK: - LibraryView
 struct LibraryView: View {
     @EnvironmentObject var libraryVM: LibraryViewModel
+    @State private var selectedTab: LibraryTab = .subscriptions
+    @State private var selectedEpisode: Episode?
+    @State private var showSettings = false
+    @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
+    
+    enum LibraryTab: String, CaseIterable {
+        case subscriptions = "Subscriptions"
+        case newReleases = "New Releases"
+    }
     
     var body: some View {
         NavigationStack {
-            List(libraryVM.subscriptions) { podcast in
-                NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
-                    HStack {
-                        CachedAsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
-                            image.resizable()
-                        } placeholder: {
-                            Color.gray
+            VStack(spacing: 0) {
+                // Tab Picker
+                Picker("Library Tab", selection: $selectedTab) {
+                    ForEach(LibraryTab.allCases, id: \.self) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding()
+                
+                // Content
+                if selectedTab == .subscriptions {
+                    subscriptionsView
+                } else {
+                    newReleasesView
+                }
+            }
+            .navigationTitle("Library")
+            .navigationDestination(item: $selectedEpisode) { episode in
+                EpisodeDetailView(
+                    episode: episode,
+                    podcastTitle: episode.podcastName ?? "Unknown Podcast",
+                    podcastImageURL: episode.podcastImageURL
+                )
+            }
+            .toolbar {
+                if selectedTab == .subscriptions {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button(action: {
+                            showSettings = true
+                        }) {
+                            Image(systemName: "gear")
                         }
-                        .frame(width: 60, height: 60)
-                        .cornerRadius(8)
-                        .shadow(radius: 6)
-                        VStack(alignment: .leading) {
-                            Text(podcast.collectionName)
-                                .font(.headline)
-                            Text(podcast.artistName)
-                                .font(.subheadline)
-                                .foregroundColor(.gray)
+                    }
+                } else {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button(action: {
+                            Task {
+                                await libraryVM.refreshAllEpisodes()
+                            }
+                        }) {
+                            Image(systemName: "arrow.clockwise")
                         }
+                        .disabled(libraryVM.isLoadingEpisodes)
                     }
                 }
             }
-            .listStyle(.plain)
-            .navigationTitle("Library")
+            .sheet(isPresented: $showSettings) {
+                LibrarySettingsSheet()
+                    .environmentObject(libraryVM)
+            }
+        }
+    }
+    
+    private var subscriptionsView: some View {
+        Group {
+            if libraryVM.subscriptions.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "books.vertical")
+                        .font(.system(size: 50))
+                        .foregroundColor(.gray)
+                    
+                    Text("No Subscriptions")
+                        .font(.title2)
+                        .foregroundColor(.gray)
+                    
+                    Text("Search for podcasts to subscribe")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if libraryVM.layoutStyle == .list {
+                // List Layout
+                List(libraryVM.sortedSubscriptions) { podcast in
+                    NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
+                        HStack {
+                            ZStack(alignment: .topTrailing) {
+                                CachedAsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
+                                    image.resizable()
+                                } placeholder: {
+                                    Color.gray
+                                }
+                                .frame(width: 60, height: 60)
+                                .cornerRadius(8)
+                                .shadow(radius: 6)
+                                
+                                if libraryVM.showUnplayedBadges {
+                                    let unplayedCount = libraryVM.getUnplayedCount(for: podcast)
+                                    if unplayedCount > 0 {
+                                        Text(libraryVM.formatUnplayedCount(unplayedCount))
+                                            .font(.caption2)
+                                            .fontWeight(.bold)
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 2)
+                                            .background(Color.red)
+                                            .cornerRadius(8)
+                                            .offset(x: 5, y: -5)
+                                    }
+                                }
+                            }
+                            
+                            VStack(alignment: .leading) {
+                                Text(podcast.collectionName)
+                                    .font(.headline)
+                                Text(podcast.artistName)
+                                    .font(.subheadline)
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+            } else {
+                // Grid Layout
+                ScrollView {
+                    LazyVGrid(columns: [
+                        GridItem(.flexible(), spacing: 12),
+                        GridItem(.flexible(), spacing: 12),
+                        GridItem(.flexible(), spacing: 12)
+                    ], spacing: 16) {
+                        ForEach(libraryVM.sortedSubscriptions) { podcast in
+                            PodcastGridItem(
+                                podcast: podcast,
+                                unplayedCount: libraryVM.getUnplayedCount(for: podcast),
+                                showBadge: libraryVM.showUnplayedBadges
+                            )
+                        }
+                    }
+                    .padding()
+                }
+            }
+        }
+    }
+    
+    private var newReleasesView: some View {
+        Group {
+            if libraryVM.isLoadingEpisodes {
+                VStack {
+                    ProgressView()
+                        .scaleEffect(1.2)
+                        .padding()
+                    Text("Loading new episodes...")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if libraryVM.subscriptions.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "star")
+                        .font(.system(size: 50))
+                        .foregroundColor(.gray)
+                    
+                    Text("No Subscriptions")
+                        .font(.title2)
+                        .foregroundColor(.gray)
+                    
+                    Text("Subscribe to podcasts to see new releases")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if libraryVM.recentEpisodes.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "calendar.badge.clock")
+                        .font(.system(size: 50))
+                        .foregroundColor(.gray)
+                    
+                    Text("No New Episodes")
+                        .font(.title2)
+                        .foregroundColor(.gray)
+                    
+                    Text("No episodes from the last 2 weeks")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                    
+                    Button("Refresh") {
+                        Task {
+                            await libraryVM.refreshAllEpisodes()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.top, 8)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(libraryVM.recentEpisodes.filter { trackingManager.shouldShowEpisode($0.id) }) { episode in
+                        EpisodeRowView(
+                            episode: episode,
+                            podcastImageURL: episode.podcastImageURL
+                        )
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedEpisode = episode
+                        }
+                        .episodeContextMenu(episode: episode)
+                    }
+                    
+                    // Show count of hidden episodes if any
+                    if trackingManager.hidePlayedEpisodes || trackingManager.hideArchivedEpisodes {
+                        let hiddenCount = libraryVM.recentEpisodes.count - libraryVM.recentEpisodes.filter { trackingManager.shouldShowEpisode($0.id) }.count
+                        
+                        if hiddenCount > 0 {
+                            Section {
+                                HStack {
+                                    Spacer()
+                                    Text("\(hiddenCount) episode\(hiddenCount == 1 ? "" : "s") hidden by filters")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                    Spacer()
+                                }
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .refreshable {
+                    await libraryVM.refreshAllEpisodes()
+                }
+            }
+        }
+        .onAppear {
+            if libraryVM.allEpisodes.isEmpty && !libraryVM.subscriptions.isEmpty {
+                Task {
+                    await libraryVM.refreshAllEpisodes()
+                }
+            }
         }
     }
 }
@@ -3683,47 +4241,12 @@ struct SessionCardView: View {
         .cornerRadius(12)
     }
 }
-/*
-struct SessionsStatsView: View {
-    @ObservedObject private var statsManager = StatisticsManager.shared
-    
-    var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 8) {
-                Text("Sessions: \(statsManager.recentSessions.count)")
-                                    .font(.caption)
-                                    .foregroundColor(.gray)
-                if statsManager.recentSessions.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: "list.bullet")
-                            .font(.system(size: 50))
-                            .foregroundColor(.gray)
-                        
-                        Text("No Sessions Yet")
-                            .font(.title2)
-                            .foregroundColor(.gray)
-                        
-                        Text("Your recent listening sessions will appear here")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding()
-                } else {
-                    ForEach(statsManager.recentSessions, id: \.id) { session in
-                        SessionRowView(session: session)
-                    }
-                }
-            }
-            .padding()
-        }
-    }
-} */
 
 //MARK: - SettingsView
 struct SettingsView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @ObservedObject private var statsManager = StatisticsManager.shared
+    @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
     @Binding var isPresented: Bool
     
     var body: some View {
@@ -3731,6 +4254,25 @@ struct SettingsView: View {
             List {
                 Section("Playback") {
                     PlaybackSpeedSettingView()
+                }
+                
+                Section("Episode Display") {
+                    Toggle("Hide Played Episodes", isOn: $trackingManager.hidePlayedEpisodes)
+                    Toggle("Hide Archived Episodes", isOn: $trackingManager.hideArchivedEpisodes)
+                    
+                    HStack {
+                        Text("Played Episodes")
+                        Spacer()
+                        Text("\(trackingManager.getTotalPlayedCount())")
+                            .foregroundColor(.gray)
+                    }
+                    
+                    HStack {
+                        Text("Archived Episodes")
+                        Spacer()
+                        Text("\(trackingManager.getTotalArchivedCount())")
+                            .foregroundColor(.gray)
+                    }
                 }
                 
                 Section("Statistics") {
@@ -4080,6 +4622,94 @@ struct SessionRowView: View {
         .padding()
         .background(Color(.systemGray6))
         .cornerRadius(8)
+    }
+}
+
+//MARK: - Episode Context Menu
+extension View {
+    func episodeContextMenu(episode: Episode) -> some View {
+        self.contextMenu {
+            EpisodeContextMenuContent(episode: episode)
+        }
+    }
+}
+
+struct EpisodeContextMenuContent: View {
+    let episode: Episode
+    @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    @ObservedObject private var downloadManager = DownloadManager.shared
+    
+    var body: some View {
+        // Play/Pause
+        Button(action: {
+            if audioVM.episode?.id == episode.id {
+                audioVM.togglePlayPause()
+            } else {
+                audioVM.playNow(episode, podcastImageURL: episode.podcastImageURL)
+            }
+        }) {
+            Label(
+                audioVM.episode?.id == episode.id && audioVM.isPlaying ? "Pause" : "Play",
+                systemImage: audioVM.episode?.id == episode.id && audioVM.isPlaying ? "pause" : "play"
+            )
+        }
+        
+        // Add to Queue
+        Button(action: {
+            audioVM.addToQueue(episode)
+        }) {
+            Label("Add to Queue", systemImage: "text.badge.plus")
+        }
+        
+        Divider()
+        
+        // Mark Played/Unplayed
+        Button(action: {
+            if trackingManager.isPlayed(episode.id) {
+                trackingManager.markAsUnplayed(episode.id)
+            } else {
+                trackingManager.markAsPlayed(episode.id)
+            }
+        }) {
+            Label(
+                trackingManager.isPlayed(episode.id) ? "Mark as Unplayed" : "Mark as Played",
+                systemImage: trackingManager.isPlayed(episode.id) ? "circle" : "checkmark.circle"
+            )
+        }
+        
+        // Archive/Unarchive
+        Button(action: {
+            trackingManager.toggleArchived(episode.id)
+        }) {
+            Label(
+                trackingManager.isArchived(episode.id) ? "Unarchive" : "Archive",
+                systemImage: trackingManager.isArchived(episode.id) ? "tray.and.arrow.up" : "archivebox"
+            )
+        }
+        
+        Divider()
+        
+        // Download
+        if downloadManager.isDownloaded(episode.id) {
+            Button(role: .destructive, action: {
+                downloadManager.deleteDownload(episode.id)
+            }) {
+                Label("Delete Download", systemImage: "trash")
+            }
+        } else if downloadManager.isDownloading(episode.id) {
+            Button(action: {
+                downloadManager.cancelDownload(episode.id)
+            }) {
+                Label("Cancel Download", systemImage: "xmark")
+            }
+        } else {
+            Button(action: {
+                downloadManager.downloadEpisode(episode)
+            }) {
+                Label("Download", systemImage: "arrow.down.circle")
+            }
+        }
     }
 }
 
