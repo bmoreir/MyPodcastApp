@@ -799,10 +799,6 @@ class StatisticsManager: ObservableObject {
     
     private func updateRecentSessions() {
         recentSessions = Array(listeningSessions.suffix(20).reversed())
-  //      print("📊 📋 Updated recent sessions: \(recentSessions.count) sessions")
-  //          for (index, session) in recentSessions.prefix(3).enumerated() {
-  //              print("📊 📋 Session \(index): \(session.episodeTitle) - \(session.duration)s")
-  //          }
     }
     
     private func calculateStreak() -> Int {
@@ -1368,7 +1364,6 @@ class EpisodeTrackingManager: ObservableObject {
     }
     
     // MARK: - Status Management
-    
     func markAsPlayed(_ episodeID: String) {
         var status = episodeStatuses[episodeID] ?? EpisodeStatus()
         status.isPlayed = true
@@ -1378,11 +1373,11 @@ class EpisodeTrackingManager: ObservableObject {
         episodeStatuses[episodeID] = status
         saveStatuses()
     }
-    
+
     func markAsUnplayed(_ episodeID: String) {
         var status = episodeStatuses[episodeID] ?? EpisodeStatus()
         status.isPlayed = false
-        // Note: Keep archived status as-is
+        status.isArchived = false // Marking unplayed also unarchives
         episodeStatuses[episodeID] = status
         saveStatuses()
     }
@@ -1768,20 +1763,15 @@ class AudioPlayerViewModel: ObservableObject {
         guard let player = player else { return }
         
         if isPlaying {
-      //      print("📊 🔄 Pausing playback")
-
             player.pause()
             isPlaying = false
             savePlaybackProgress()
             StatisticsManager.shared.pauseSession()
-            SessionManager.shared.pauseEpisodeInSession() // ADD
+            SessionManager.shared.pauseEpisodeInSession()
         } else {
-    //        print("📊 ▶️ Starting playback")
-
-   //         player.play()
             player.rate = playbackSpeed // Use the current speed setting
             isPlaying = true
-            SessionManager.shared.resumeEpisodeInSession() // ADD
+            SessionManager.shared.resumeEpisodeInSession()
 
             if let episode = episode {
                         StatisticsManager.shared.startListeningSession(for: episode)
@@ -2271,23 +2261,29 @@ class LibraryViewModel: ObservableObject {
             return subscriptions.sorted { $0.collectionName.lowercased() < $1.collectionName.lowercased() }
         }
     }
-
+    
     func getUnplayedCount(for podcast: Podcast) -> Int {
         let podcastEpisodes = allEpisodes.filter { $0.podcastName == podcast.collectionName }
         let trackingManager = EpisodeTrackingManager.shared
-        return podcastEpisodes.filter { !trackingManager.isPlayed($0.id) }.count
+        let playedCount = podcastEpisodes.filter { trackingManager.isPlayed($0.id) }.count
+        return podcastEpisodes.count - playedCount
     }
-
+    
     func formatUnplayedCount(_ count: Int) -> String {
         if count == 0 {
             return ""
         } else if count < 100 {
             return "\(count)"
         } else if count < 1000 {
-            return String(format: "%.1fk", Double(count) / 1000.0)
+            // For 100-999, truncate to one decimal place (e.g., 0.1k, 0.5k, 0.9k)
+            let truncated = floor(Double(count) / 100.0) / 10.0
+            return String(format: "%.1fk", truncated)
+        } else if count < 10000 {
+            // For 1000-9999, truncate to one decimal place
+            let truncated = floor(Double(count) / 100.0) / 10.0
+            return String(format: "%.1fk", truncated)
         } else {
-            let thousands = count / 1000
-            return "\(thousands)k"
+            return "+"
         }
     }
 
@@ -2648,9 +2644,17 @@ struct PodcastDetailView: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal)
                     
-                    Text("\(filteredEpisodes.count) of \(episodes.count) episodes")
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
+                    HStack(spacing: 4) {
+                        Text("\(episodes.count) episodes")
+                        
+                        let archivedCount = episodes.filter { trackingManager.isArchived($0.id) }.count
+                        if archivedCount > 0 {
+                            Text("•")
+                            Text("\(archivedCount) archived")
+                        }
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.gray)
                     
                     HStack(spacing: 12) {
                         Button(action: {
@@ -3449,12 +3453,6 @@ struct PodcastGridItem: View {
                             .offset(x: 4, y: -4)
                     }
                 }
-                
-                Text(podcast.collectionName)
-                    .font(.caption)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(.primary)
             }
         }
         .buttonStyle(PlainButtonStyle())
@@ -3628,6 +3626,7 @@ struct LibraryView: View {
                                             .background(Color.red)
                                             .cornerRadius(8)
                                             .offset(x: 5, y: -5)
+                                            .id(trackingManager.episodeStatuses.count)
                                     }
                                 }
                             }
@@ -3717,7 +3716,7 @@ struct LibraryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
-                    ForEach(libraryVM.recentEpisodes.filter { trackingManager.shouldShowEpisode($0.id) }) { episode in
+                    ForEach(libraryVM.recentEpisodes.filter { !trackingManager.isPlayed($0.id) && trackingManager.shouldShowEpisode($0.id) }) { episode in
                         EpisodeRowView(
                             episode: episode,
                             podcastImageURL: episode.podcastImageURL
