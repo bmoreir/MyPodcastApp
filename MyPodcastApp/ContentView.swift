@@ -104,6 +104,12 @@ struct SearchResults: Decodable {
     let results: [Podcast]
 }
 
+//MARK: - PodcastSettings
+struct PodcastSettings: Codable {
+    var skipIntroSeconds: Double = 0
+    var skipOutroSeconds: Double = 0
+}
+
 //MARK: - RSSParser
 class RSSParser: NSObject, XMLParserDelegate {
     var episodes: [Episode] = []
@@ -118,6 +124,7 @@ class RSSParser: NSObject, XMLParserDelegate {
     var podcastImageURL = ""
     var podcastName = ""
     var currentEpisodeNumber = ""
+    var isReadingDescription = false  // ADD THIS
     
     private var parseError: Error?
     private var foundValidItems = false
@@ -171,6 +178,7 @@ class RSSParser: NSObject, XMLParserDelegate {
             imageURL = ""
             currentDescription = ""
             currentEpisodeNumber = ""
+            isReadingDescription = false  // ADD THIS
         }
         
         // Handle audio enclosures
@@ -209,10 +217,25 @@ class RSSParser: NSObject, XMLParserDelegate {
             currentPubDate += trimmedString
         case "itunes:duration":
             duration += trimmedString
-        case "description", "itunes:summary":
+        case "description":
+                    if insideItem && !isReadingDescription {
+                        currentDescription = trimmedString  // REPLACE instead of append first time
+                        isReadingDescription = true
+                    } else if insideItem && isReadingDescription {
+                        currentDescription += trimmedString  // Then append subsequent chunks
+                    }
+                case "itunes:summary":
+                    // Only use itunes:summary if description is still empty
+                    if insideItem && currentDescription.isEmpty && !isReadingDescription {
+                        currentDescription = trimmedString
+                        isReadingDescription = true
+                    } else if insideItem && isReadingDescription && currentDescription.isEmpty {
+                        currentDescription += trimmedString
+                    }
+   /*     case "description", "itunes:summary":
             if insideItem {
                 currentDescription += trimmedString
-            }
+            } */
         case "itunes:episode":
             currentEpisodeNumber += trimmedString
         default:
@@ -221,6 +244,10 @@ class RSSParser: NSObject, XMLParserDelegate {
     }
     
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        if elementName == "description" || elementName == "itunes:summary" {
+                    isReadingDescription = false  // ADD THIS
+                }
+        
         if elementName == "item" {
             // Only add episode if it has essential data
             if !currentTitle.isEmpty && !currentAudioURL.isEmpty {
@@ -1134,8 +1161,10 @@ class DownloadManager: NSObject, ObservableObject {
     @Published var downloadedEpisodes: Set<String> = []
     @Published var downloadProgress: [String: Double] = [:]
     @Published var activeDownloads: Set<String> = []
+    @Published var autoDeleteOnCompletion: Bool = false  // ADD THIS
     
     private let downloadedEpisodesKey = "downloadedEpisodes"
+    private let autoDeleteKey = "autoDeleteOnCompletion"  // ADD THIS
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
     private let taskMapper = TaskMapper()
     
@@ -1149,8 +1178,20 @@ class DownloadManager: NSObject, ObservableObject {
     private override init() {
         super.init()
         loadDownloadedEpisodes()
+        loadAutoDeleteSetting()  // ADD THIS
         createDownloadsDirectory()
     }
+    
+    // ADD THIS METHOD
+        private func loadAutoDeleteSetting() {
+            autoDeleteOnCompletion = UserDefaults.standard.bool(forKey: autoDeleteKey)
+        }
+        
+        // ADD THIS METHOD
+        func setAutoDelete(_ enabled: Bool) {
+            autoDeleteOnCompletion = enabled
+            UserDefaults.standard.set(enabled, forKey: autoDeleteKey)
+        }
     
     private func createDownloadsDirectory() {
         let fileManager = FileManager.default
@@ -1670,11 +1711,24 @@ class AudioPlayerViewModel: ObservableObject {
         
         addPeriodicTimeObserver()
         
+        // REPLACE the savedTime restoration with this:
+            let settings = PodcastSortPreferences.shared.getSettings(for: episode.podcastName ?? "")
+            
+            if let savedTime = elapsedTimes[episode.audioURL], savedTime > 0 {
+                let adjustedTime = savedTime + settings.skipIntroSeconds
+                let cmTime = CMTime(seconds: adjustedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+                player?.seek(to: cmTime)
+            } else if settings.skipIntroSeconds > 0 {
+                // First time playing, skip intro
+                let cmTime = CMTime(seconds: settings.skipIntroSeconds, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+                player?.seek(to: cmTime)
+            }
+        /*
         if let savedTime = elapsedTimes[episode.audioURL], savedTime > 0 {
             let cmTime = CMTime(seconds: savedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
             player?.seek(to: cmTime)
         }
-        
+        */
         updateNowPlayingInfo()
         StatisticsManager.shared.startListeningSession(for: episode)
         SessionManager.shared.startEpisodeInSession(episode: episode)
@@ -1731,6 +1785,9 @@ class AudioPlayerViewModel: ObservableObject {
         commandCenter.pauseCommand.removeTarget(nil)
         commandCenter.skipForwardCommand.removeTarget(nil)
         commandCenter.skipBackwardCommand.removeTarget(nil)
+        commandCenter.nextTrackCommand.removeTarget(nil)  // ADD THIS
+        commandCenter.previousTrackCommand.removeTarget(nil)  // ADD THIS
+        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
         
         // Clear now playing info
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -1753,8 +1810,23 @@ class AudioPlayerViewModel: ObservableObject {
         let interval = CMTime(seconds: 1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             DispatchQueue.main.async {
-                self?.currentTime = time.seconds
-                self?.savePlaybackProgress()
+                guard let self = self else { return }
+                self.currentTime = time.seconds
+                self.savePlaybackProgress()
+                
+                // ADD THIS: Check if we should skip outro
+                if let episode = self.episode,
+                   let podcastName = episode.podcastName {
+                    let settings = PodcastSortPreferences.shared.getSettings(for: podcastName)
+                    let timeRemaining = self.durationTime - self.currentTime
+                    
+                    if settings.skipOutroSeconds > 0 &&
+                        timeRemaining <= settings.skipOutroSeconds &&
+                        timeRemaining > 0.5 {
+                        // Skip to end to trigger next episode
+                        self.playerDidFinishPlaying()
+                    }
+                }
             }
         }
     }
@@ -1781,14 +1853,14 @@ class AudioPlayerViewModel: ObservableObject {
         updateNowPlayingInfo()
     }
     
-    func skipForward(seconds: Double = 15) {
+    func skipForward(seconds: Double = 30) {
         guard let player = player else { return }
         let current = player.currentTime()
         let newTime = CMTime(seconds: current.seconds + seconds, preferredTimescale: current.timescale)
         player.seek(to: newTime)
     }
     
-    func skipBackward(seconds: Double = 15) {
+    func skipBackward(seconds: Double = 10) {
         guard let player = player else { return }
         let current = player.currentTime()
         let newTime = CMTime(seconds: max(current.seconds - seconds, 0), preferredTimescale: current.timescale)
@@ -1837,7 +1909,14 @@ class AudioPlayerViewModel: ObservableObject {
             
             if let episodeID = self.episode?.id {
                         EpisodeTrackingManager.shared.markAsPlayed(episodeID)
+                
+                if DownloadManager.shared.autoDeleteOnCompletion &&
+                               DownloadManager.shared.isDownloaded(episodeID) {
+                                print("🗑️ Auto-deleting completed episode: \(episodeID)")
+                                DownloadManager.shared.deleteDownload(episodeID)
+                            }
                     }
+            
 
             StatisticsManager.shared.endListeningSession(completed: true)
             SessionManager.shared.endCurrentEpisodeSession(completed: true)
@@ -2019,7 +2098,137 @@ class AudioPlayerViewModel: ObservableObject {
             break
         }
     }
-
+    
+    private func setupRemoteTransportControls() {
+        let commandCenter = MPRemoteCommandCenter.shared()
+        
+        // Disable all commands first to reset
+        commandCenter.skipForwardCommand.isEnabled = false
+        commandCenter.skipBackwardCommand.isEnabled = false
+        commandCenter.nextTrackCommand.isEnabled = false
+        commandCenter.previousTrackCommand.isEnabled = false
+        
+        // Remove all existing targets
+        commandCenter.playCommand.removeTarget(nil)
+        commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.skipForwardCommand.removeTarget(nil)
+        commandCenter.skipBackwardCommand.removeTarget(nil)
+        commandCenter.nextTrackCommand.removeTarget(nil)
+        commandCenter.previousTrackCommand.removeTarget(nil)
+        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
+        
+        // Configure skip intervals BEFORE enabling
+        commandCenter.skipForwardCommand.preferredIntervals = [NSNumber(value: 30)]
+        commandCenter.skipBackwardCommand.preferredIntervals = [NSNumber(value: 10)]
+        
+        // Now enable commands
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.skipForwardCommand.isEnabled = true
+        commandCenter.skipBackwardCommand.isEnabled = true
+        commandCenter.nextTrackCommand.isEnabled = true
+        commandCenter.previousTrackCommand.isEnabled = true
+        commandCenter.changePlaybackPositionCommand.isEnabled = true
+        
+        // Add handlers
+        commandCenter.playCommand.addTarget { [weak self] _ in
+            print("🎧 Play command received")
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if self.player != nil && !self.isPlaying {
+                    self.togglePlayPause()
+                }
+            }
+            return .success
+        }
+        
+        commandCenter.pauseCommand.addTarget { [weak self] _ in
+            print("🎧 Pause command received")
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if self.isPlaying {
+                    self.togglePlayPause()
+                }
+            }
+            return .success
+        }
+        
+        commandCenter.skipForwardCommand.addTarget { [weak self] event in
+            print("🎧 Skip Forward command received")
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let skipEvent = event as? MPSkipIntervalCommandEvent {
+                    self.skipForward(seconds: skipEvent.interval)
+                } else {
+                    self.skipForward(seconds: 30)
+                }
+            }
+            return .success
+        }
+        
+        commandCenter.skipBackwardCommand.addTarget { [weak self] event in
+            print("🎧 Skip Backward command received")
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let skipEvent = event as? MPSkipIntervalCommandEvent {
+                    self.skipBackward(seconds: skipEvent.interval)
+                } else {
+                    self.skipBackward(seconds: 10)
+                }
+            }
+            return .success
+        }
+        
+        // SWAPPED: Next Track (double-tap) now skips forward 30 seconds
+        commandCenter.nextTrackCommand.addTarget { [weak self] _ in
+            print("🎧 Next Track command received (mapped to skip forward)")
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.skipForward(seconds: 30)
+            }
+            return .success
+        }
+        
+        // SWAPPED: Previous Track (triple-tap) now skips backward 10 seconds
+        commandCenter.previousTrackCommand.addTarget { [weak self] _ in
+            print("🎧 Previous Track command received (mapped to skip backward)")
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.skipBackward(seconds: 10)
+            }
+            return .success
+        }
+        
+        commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+            print("🎧 Change Playback Position command received")
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+            
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let newTime = CMTime(seconds: event.positionTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+                self.player?.seek(to: newTime)
+            }
+            return .success
+        }
+        
+        // Verify setup
+        verifyRemoteCommands()
+    }
+    
+    private func verifyRemoteCommands() {
+        let commandCenter = MPRemoteCommandCenter.shared()
+        
+        print("🎧 Remote Command Status:")
+        print("  Play: \(commandCenter.playCommand.isEnabled)")
+        print("  Pause: \(commandCenter.pauseCommand.isEnabled)")
+        print("  Skip Forward: \(commandCenter.skipForwardCommand.isEnabled)")
+        print("  Skip Backward: \(commandCenter.skipBackwardCommand.isEnabled)")
+        print("  Next Track: \(commandCenter.nextTrackCommand.isEnabled)")
+        print("  Previous Track: \(commandCenter.previousTrackCommand.isEnabled)")
+    }
+/*
     private func setupRemoteTransportControls() {
         let commandCenter = MPRemoteCommandCenter.shared()
         
@@ -2060,7 +2269,7 @@ class AudioPlayerViewModel: ObservableObject {
             return .success
         }
     }
-
+*/
     // Update the now playing info for lock screen/control center
     private func updateNowPlayingInfo() {
         guard let episode = episode else {
@@ -2099,26 +2308,29 @@ class AudioPlayerViewModel: ObservableObject {
     // Keep deinit for completeness, though it won't be called for singleton
     deinit {
         if let observer = audioSessionObserver {
-                   NotificationCenter.default.removeObserver(observer)
-               }
-               if let observer = routeChangeObserver {
-                   NotificationCenter.default.removeObserver(observer)
-               }
-               if let observer = playerItemObserver {
-                   NotificationCenter.default.removeObserver(observer)
-               }
-               
-               // Remove time observer
-               if let token = timeObserverToken, let player = player {
-                   player.removeTimeObserver(token)
-               }
-               
-               // Clean up remote command handlers
-               let commandCenter = MPRemoteCommandCenter.shared()
-               commandCenter.playCommand.removeTarget(nil)
-               commandCenter.pauseCommand.removeTarget(nil)
-               commandCenter.skipForwardCommand.removeTarget(nil)
-               commandCenter.skipBackwardCommand.removeTarget(nil)
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = routeChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = playerItemObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        
+        // Remove time observer
+        if let token = timeObserverToken, let player = player {
+            player.removeTimeObserver(token)
+        }
+        
+        // Clean up remote command handlers
+        let commandCenter = MPRemoteCommandCenter.shared()
+        commandCenter.playCommand.removeTarget(nil)
+        commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.skipForwardCommand.removeTarget(nil)
+        commandCenter.skipBackwardCommand.removeTarget(nil)
+        commandCenter.nextTrackCommand.removeTarget(nil)  // ADD THIS
+        commandCenter.previousTrackCommand.removeTarget(nil)  // ADD THIS
+        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
     }
 }
 
@@ -2511,9 +2723,33 @@ struct SearchView: View {
     var body: some View {
         NavigationStack {
             VStack {
-                TextField("Search podcasts...", text: $searchText)
+             /*   TextField("Search podcasts...", text: $searchText)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .padding()
+                    .padding() */
+                ZStack(alignment: .trailing) {
+                                    TextField("Search podcasts...", text: $searchText)
+                                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                                        .onSubmit {
+                                            Task {
+                                                await fetcher.search(term: searchText)
+                                            }
+                                        }
+                                    
+                                    if !searchText.isEmpty {
+                                        Button(action: {
+                                            searchText = ""
+                         //                   fetcher.podcasts = []
+                                        }) {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .foregroundColor(.gray)
+                                                .padding(.trailing, 8)
+                                        }
+                                        .buttonStyle(PlainButtonStyle())
+                                        .transition(.scale.combined(with: .opacity))
+                                    }
+                                }
+                                .padding()
+                                .animation(.easeInOut(duration: 0.2), value: searchText.isEmpty)
                     .onSubmit {
                         Task {
                             await fetcher.search(term: searchText)
@@ -2601,6 +2837,69 @@ struct SearchView: View {
     }
 }
 
+//MARK: - PodcastSortPreferences
+@MainActor
+class PodcastSortPreferences: ObservableObject {
+    static let shared = PodcastSortPreferences()
+    
+    @Published var sortOrders: [String: EpisodeSortOrder] = [:]
+    @Published var podcastSettings: [String: PodcastSettings] = [:]  // ADD THIS
+    
+    private let sortOrdersKey = "podcastSortOrders"
+    private let settingsKey = "podcastSettings"  // ADD THIS
+    
+    enum EpisodeSortOrder: String, Codable {
+        case newestFirst = "Newest First"
+        case oldestFirst = "Oldest First"
+    }
+    
+    private init() {
+        loadSortOrders()
+    }
+    
+    func getSortOrder(for podcastName: String) -> EpisodeSortOrder {
+        return sortOrders[podcastName] ?? .newestFirst
+    }
+    
+    func setSortOrder(_ order: EpisodeSortOrder, for podcastName: String) {
+        sortOrders[podcastName] = order
+        saveSortOrders()
+    }
+    
+    private func saveSortOrders() {
+        if let data = try? JSONEncoder().encode(sortOrders) {
+            UserDefaults.standard.set(data, forKey: sortOrdersKey)
+        }
+    }
+    
+    private func loadSortOrders() {
+        if let data = UserDefaults.standard.data(forKey: sortOrdersKey),
+           let decoded = try? JSONDecoder().decode([String: EpisodeSortOrder].self, from: data) {
+            sortOrders = decoded
+        }
+        
+        if let data = UserDefaults.standard.data(forKey: settingsKey),
+           let decoded = try? JSONDecoder().decode([String: PodcastSettings].self, from: data) {
+            podcastSettings = decoded
+        }
+    }
+    
+    func getSettings(for podcastName: String) -> PodcastSettings {
+        return podcastSettings[podcastName] ?? PodcastSettings()
+    }
+    
+    func setSettings(_ settings: PodcastSettings, for podcastName: String) {
+        podcastSettings[podcastName] = settings
+        saveSettings()
+    }
+    
+    private func saveSettings() {
+        if let data = try? JSONEncoder().encode(podcastSettings) {
+            UserDefaults.standard.set(data, forKey: settingsKey)
+        }
+    }
+}
+
 //MARK: - PodcastDetailView
 struct PodcastDetailView: View {
     let podcast: Podcast
@@ -2610,12 +2909,27 @@ struct PodcastDetailView: View {
     @State private var loadingError: String?
     @State private var selectedEpisode: Episode?
     @State private var showFilterOptions = false
+    @State private var isSelectionMode = false  // NEW
+    @State private var selectedEpisodes: Set<String> = []  // NEW
     @EnvironmentObject var libraryVM: LibraryViewModel
     @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
+    @ObservedObject private var sortPreferences = PodcastSortPreferences.shared  // NEW
     
     var filteredEpisodes: [Episode] {
         episodes.filter { episode in
             trackingManager.shouldShowEpisode(episode.id)
+        }
+    }
+    
+    var sortedAndFilteredEpisodes: [Episode] {
+        let filtered = filteredEpisodes
+        let sortOrder = sortPreferences.getSortOrder(for: podcast.collectionName)
+        
+        switch sortOrder {
+        case .newestFirst:
+            return filtered.sorted { ($0.pubDate ?? Date.distantPast) > ($1.pubDate ?? Date.distantPast) }
+        case .oldestFirst:
+            return filtered.sorted { ($0.pubDate ?? Date.distantPast) < ($1.pubDate ?? Date.distantPast) }
         }
     }
     
@@ -2700,6 +3014,15 @@ struct PodcastDetailView: View {
                     Toggle("Hide Played Episodes", isOn: $trackingManager.hidePlayedEpisodes)
                     Toggle("Hide Archived Episodes", isOn: $trackingManager.hideArchivedEpisodes)
                     
+             /*       Picker("Sort Order", selection: Binding(
+                        get: { sortPreferences.getSortOrder(for: podcast.collectionName) },
+                        set: { sortPreferences.setSortOrder($0, for: podcast.collectionName) }
+                    )) {
+                        Text("Newest First").tag(PodcastSortPreferences.EpisodeSortOrder.newestFirst)
+                        Text("Oldest First").tag(PodcastSortPreferences.EpisodeSortOrder.oldestFirst)
+                    }
+                    .pickerStyle(.segmented) */
+                    
                     if !episodes.isEmpty {
                         Button("Mark All as Played") {
                             trackingManager.markAllAsPlayed(for: episodes)
@@ -2709,7 +3032,33 @@ struct PodcastDetailView: View {
                             trackingManager.markAllAsUnplayed(for: episodes)
                         }
                     }
+                    
+                    Toggle("Show Oldest First", isOn: Binding(
+                        get: { sortPreferences.getSortOrder(for: podcast.collectionName) == .oldestFirst },
+                        set: { isOn in
+                            sortPreferences.setSortOrder(
+                                isOn ? .oldestFirst : .newestFirst,
+                                for: podcast.collectionName
+                            )
+                        }
+                    ))
+                    /*      Toggle("Hide Played Episodes", isOn: $trackingManager.hidePlayedEpisodes)
+                    Toggle("Hide Archived Episodes", isOn: $trackingManager.hideArchivedEpisodes)
+                    
+                    if !episodes.isEmpty {
+                        Button("Mark All as Played") {
+                            trackingManager.markAllAsPlayed(for: episodes)
+                        }
+                        
+                        Button("Mark All as Unplayed") {
+                            trackingManager.markAllAsUnplayed(for: episodes)
+                        }
+                    } */
                 }
+                
+                Section("Skip Settings") {
+                        SkipIntroOutroSettings(podcastName: podcast.collectionName)
+                    }
             }
             
             // Loading/Error/Empty states
@@ -2761,7 +3110,7 @@ struct PodcastDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
             }
-            else if filteredEpisodes.isEmpty && hasLoadedEpisodes {
+            else if sortedAndFilteredEpisodes.isEmpty && hasLoadedEpisodes {
                 Section {
                     VStack(spacing: 12) {
                         Image(systemName: episodes.isEmpty ? "podcast" : "eye.slash")
@@ -2796,7 +3145,47 @@ struct PodcastDetailView: View {
                 .listRowSeparator(.hidden)
             }
             else {
-                ForEach(filteredEpisodes) { episode in
+                ForEach(sortedAndFilteredEpisodes) { episode in
+                    HStack(spacing: 12) {
+                        if isSelectionMode {
+                            Button(action: {
+                                if selectedEpisodes.contains(episode.id) {
+                                    selectedEpisodes.remove(episode.id)
+                                } else {
+                                    selectedEpisodes.insert(episode.id)
+                                }
+                            }) {
+                                Image(systemName: selectedEpisodes.contains(episode.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(selectedEpisodes.contains(episode.id) ? .blue : .gray)
+                                    .font(.title3)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                        
+                        EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if isSelectionMode {
+                                    if selectedEpisodes.contains(episode.id) {
+                                        selectedEpisodes.remove(episode.id)
+                                    } else {
+                                        selectedEpisodes.insert(episode.id)
+                                    }
+                                } else {
+                                    selectedEpisode = episode
+                                }
+                            }
+                            .onLongPressGesture {
+                                if !isSelectionMode {
+                                    isSelectionMode = true
+                                    selectedEpisodes.insert(episode.id)
+                                }
+                            }
+                    }
+                    .episodeContextMenu(episode: episode)
+                }
+           /*     ForEach(filteredEpisodes) { episode in
                     EpisodeRowView(episode: episode, podcastImageURL: podcast.artworkUrl600)
                         .padding(.vertical, 4)
                         .contentShape(Rectangle())
@@ -2804,12 +3193,66 @@ struct PodcastDetailView: View {
                             selectedEpisode = episode
                         }
                         .episodeContextMenu(episode: episode)
-                }
+                } */
             }
         }
         .listStyle(.plain)
         .navigationTitle(podcast.collectionName)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if isSelectionMode {
+                    Button("Done") {
+                        isSelectionMode = false
+                        selectedEpisodes.removeAll()
+                    }
+                } else {
+                    Button("Select") {
+                        isSelectionMode = true
+                    }
+                }
+            }
+            
+            if isSelectionMode && !selectedEpisodes.isEmpty {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Menu {
+                        Button("Mark as Played") {
+                            for episodeID in selectedEpisodes {
+                                trackingManager.markAsPlayed(episodeID)
+                            }
+                            selectedEpisodes.removeAll()
+                            isSelectionMode = false
+                        }
+                        
+                        Button("Mark as Unplayed") {
+                            for episodeID in selectedEpisodes {
+                                trackingManager.markAsUnplayed(episodeID)
+                            }
+                            selectedEpisodes.removeAll()
+                            isSelectionMode = false
+                        }
+                        
+                        Button("Archive") {
+                            for episodeID in selectedEpisodes {
+                                trackingManager.archive(episodeID)
+                            }
+                            selectedEpisodes.removeAll()
+                            isSelectionMode = false
+                        }
+                        
+                        Button("Unarchive") {
+                            for episodeID in selectedEpisodes {
+                                trackingManager.unarchive(episodeID)
+                            }
+                            selectedEpisodes.removeAll()
+                            isSelectionMode = false
+                        }
+                    } label: {
+                        Text("Actions (\(selectedEpisodes.count))")
+                    }
+                }
+            }
+        }
         .navigationDestination(item: $selectedEpisode) { episode in
             EpisodeDetailView(episode: episode, podcastTitle: podcast.collectionName, podcastImageURL: podcast.artworkUrl600)
         }
@@ -3219,7 +3662,8 @@ struct EpisodeDetailView: View {
 //MARK: - EpisodeDescriptionView
 struct EpisodeDescriptionView: View {
     let htmlString: String
-    
+    @Environment(\.colorScheme) var colorScheme  // ADDED THIS LINE
+
     var body: some View {
         if let description = parsedDescription {
             Text(description)
@@ -3240,6 +3684,12 @@ struct EpisodeDescriptionView: View {
            var swiftUIAttrStr = try? AttributedString(nsAttrStr, including: \.uiKit) {
             for run in swiftUIAttrStr.runs {
                 swiftUIAttrStr[run.range].font = .system(size: 16)
+                // Force text color to adapt to color scheme
+                if colorScheme == .dark {
+                    swiftUIAttrStr[run.range].foregroundColor = .white
+                } else {
+                    swiftUIAttrStr[run.range].foregroundColor = .black
+                }
             }
             return swiftUIAttrStr
         }
@@ -3307,7 +3757,7 @@ struct EpisodePlayerView: View {
                 
                 HStack(spacing: 30) {
                     Button(action: { audioVM.skipBackward() }) {
-                        Image(systemName: "gobackward.15")
+                        Image(systemName: "gobackward.10")
                             .font(.title)
                     }
                     Button(action: {
@@ -3319,7 +3769,7 @@ struct EpisodePlayerView: View {
                                 .font(.system(size: 100))
                         }
                     Button(action: { audioVM.skipForward() }) {
-                        Image(systemName: "goforward.15")
+                        Image(systemName: "goforward.30")
                             .font(.title)
                     }
                 }
@@ -4246,6 +4696,80 @@ struct SettingsView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @ObservedObject private var statsManager = StatisticsManager.shared
     @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
+    @ObservedObject private var downloadManager = DownloadManager.shared  // ADD THIS
+    @Binding var isPresented: Bool
+    
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Playback") {
+                    PlaybackSpeedSettingView()
+                }
+                
+                Section("Downloads") {
+                    Toggle("Auto-Delete on Completion", isOn: Binding(
+                        get: { downloadManager.autoDeleteOnCompletion },
+                        set: { downloadManager.setAutoDelete($0) }
+                    ))
+                    
+                    Text("Automatically delete downloaded episodes when they finish playing")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Section("Episode Information") {
+                    HStack {
+                        Text("Played Episodes")
+                        Spacer()
+                        Text("\(trackingManager.getTotalPlayedCount())")
+                            .foregroundColor(.gray)
+                    }
+                    
+                    HStack {
+                        Text("Archived Episodes")
+                        Spacer()
+                        Text("\(trackingManager.getTotalArchivedCount())")
+                            .foregroundColor(.gray)
+                    }
+                }
+                .headerProminence(.increased)
+                
+                Section {
+                    Text("Episode visibility filters are now set per-podcast in each podcast's detail view")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Section("Statistics") {
+                    Button("Clear All Statistics", role: .destructive) {
+                        statsManager.clearAllStats()
+                    }
+                }
+                
+                Section("Cache") {
+                    Button("Clear Image Cache") {
+                        ImageCache.shared.clearCache()
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        isPresented = false
+                    }
+                }
+            }
+        }
+    }
+}
+/*
+//MARK: - SettingsView
+struct SettingsView: View {
+    @ObservedObject private var audioVM = AudioPlayerViewModel.shared
+    @ObservedObject private var statsManager = StatisticsManager.shared
+    @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
     @Binding var isPresented: Bool
     
     var body: some View {
@@ -4298,7 +4822,7 @@ struct SettingsView: View {
         }
     }
 }
-
+*/
 struct PlaybackSpeedSettingView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     
@@ -4708,6 +5232,71 @@ struct EpisodeContextMenuContent: View {
             }) {
                 Label("Download", systemImage: "arrow.down.circle")
             }
+        }
+    }
+}
+
+//MARK: - SkipIntroOutroSettings
+struct SkipIntroOutroSettings: View {
+    let podcastName: String
+    @ObservedObject private var sortPreferences = PodcastSortPreferences.shared
+    
+    @State private var skipIntroSeconds: Double = 0
+    @State private var skipOutroSeconds: Double = 0
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Skip Intro
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Skip Intro")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(Int(skipIntroSeconds))s")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                
+                Slider(value: $skipIntroSeconds, in: 0...180, step: 5)
+                    .onChange(of: skipIntroSeconds) { _, newValue in
+                        var settings = sortPreferences.getSettings(for: podcastName)
+                        settings.skipIntroSeconds = newValue
+                        sortPreferences.setSettings(settings, for: podcastName)
+                    }
+                
+                Text("Skip the first \(Int(skipIntroSeconds)) seconds of each episode")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            // Skip Outro
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Skip Outro")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(Int(skipOutroSeconds))s")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                
+                Slider(value: $skipOutroSeconds, in: 0...180, step: 5)
+                    .onChange(of: skipOutroSeconds) { _, newValue in
+                        var settings = sortPreferences.getSettings(for: podcastName)
+                        settings.skipOutroSeconds = newValue
+                        sortPreferences.setSettings(settings, for: podcastName)
+                    }
+                
+                Text("Skip the last \(Int(skipOutroSeconds)) seconds of each episode")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 8)
+        .onAppear {
+            let settings = sortPreferences.getSettings(for: podcastName)
+            skipIntroSeconds = settings.skipIntroSeconds
+            skipOutroSeconds = settings.skipOutroSeconds
         }
     }
 }
