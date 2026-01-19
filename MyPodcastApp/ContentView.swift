@@ -122,12 +122,14 @@ class RSSParser: NSObject, XMLParserDelegate {
     var duration = ""
     var imageURL = ""
     var currentDescription = ""
+    var currentContentEncoded = ""
     var insideItem = false
     var podcastImageURL = ""
     var podcastName = ""
     var currentEpisodeNumber = ""
     var currentSeasonNumber = ""
     var isReadingDescription = false
+    var isReadingContentEncoded = false
     
     private var parseError: Error?
     private var foundValidItems = false
@@ -180,9 +182,11 @@ class RSSParser: NSObject, XMLParserDelegate {
             duration = ""
             imageURL = ""
             currentDescription = ""
+            currentContentEncoded = ""
             currentEpisodeNumber = ""
             currentSeasonNumber = ""
             isReadingDescription = false
+            isReadingContentEncoded = false
         }
         
         // Handle audio enclosures
@@ -228,6 +232,13 @@ class RSSParser: NSObject, XMLParserDelegate {
             } else if insideItem && isReadingDescription {
                 currentDescription += trimmedString
             }
+        case "content:encoded":
+                    if insideItem && !isReadingContentEncoded {
+                        currentContentEncoded = trimmedString
+                        isReadingContentEncoded = true
+                    } else if insideItem && isReadingContentEncoded {
+                        currentContentEncoded += trimmedString
+                    }
         case "itunes:summary":
             // Only use itunes:summary if description is still empty
             if insideItem && currentDescription.isEmpty && !isReadingDescription {
@@ -250,6 +261,10 @@ class RSSParser: NSObject, XMLParserDelegate {
             isReadingDescription = false
         }
         
+        if elementName == "content:encoded" {
+                    isReadingContentEncoded = false
+                }
+        
         if elementName == "item" {
             // Only add episode if it has essential data
             if !currentTitle.isEmpty && !currentAudioURL.isEmpty {
@@ -264,6 +279,17 @@ class RSSParser: NSObject, XMLParserDelegate {
         // Parse the publication date with multiple format attempts
         let pubDate = RSSDateParser.parseDate(from: currentPubDate.trimmingCharacters(in: .whitespacesAndNewlines))
         
+        var finalDescription = currentDescription
+                if !currentContentEncoded.isEmpty {
+                    // Check if content:encoded has HTML tags
+                    if currentContentEncoded.contains("<") && currentContentEncoded.contains(">") {
+                        finalDescription = currentContentEncoded
+                    } else if currentDescription.isEmpty {
+                        // If description is empty, use content:encoded even without HTML
+                        finalDescription = currentContentEncoded
+                    }
+                }
+        
         return Episode(
             title: currentTitle.trimmingCharacters(in: .whitespacesAndNewlines),
             pubDate: pubDate,
@@ -271,7 +297,7 @@ class RSSParser: NSObject, XMLParserDelegate {
             duration: duration.isEmpty ? nil : duration.trimmingCharacters(in: .whitespacesAndNewlines),
             imageURL: imageURL.isEmpty ? nil : imageURL.trimmingCharacters(in: .whitespacesAndNewlines),
             podcastImageURL: podcastImageURL.isEmpty ? nil : podcastImageURL.trimmingCharacters(in: .whitespacesAndNewlines),
-            description: currentDescription.isEmpty ? nil : currentDescription.trimmingCharacters(in: .whitespacesAndNewlines),
+            description: finalDescription.isEmpty ? nil : finalDescription.trimmingCharacters(in: .whitespacesAndNewlines),
             podcastName: podcastName.isEmpty ? nil : podcastName.trimmingCharacters(in: .whitespacesAndNewlines),
             episodeNumber: currentEpisodeNumber.isEmpty ? nil : currentEpisodeNumber.trimmingCharacters(in: .whitespacesAndNewlines),
             seasonNumber: currentSeasonNumber.isEmpty ? nil : currentSeasonNumber.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -517,7 +543,6 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
     }
 }
 
-// Add this struct anywhere in your file, outside of classes
 struct DurationFormatter {
     static func formatDuration(_ seconds: TimeInterval) -> String {
         let hours = Int(seconds) / 3600
@@ -690,34 +715,29 @@ class StatisticsManager: ObservableObject {
         if let currentEpisode = currentEpisode,
            currentEpisode.id == episode.id,
            currentSessionStart != nil {
-            //          print("📊 Session already active for this episode, skipping")
             return
         }
         
         // End previous session if one exists for a different episode
         if currentSessionStart != nil {
-            //        print("📊 Ending previous session before starting new one")
             endListeningSession(completed: false)
         }
         
         currentSessionStart = Date()
         currentEpisode = episode
-        //      print("📊 ✅ Started session for: \(episode.title)")
     }
     
     func endListeningSession(completed: Bool = false) {
         guard let startTime = currentSessionStart,
               let episode = currentEpisode else {
-            //        print("📊 ❌ No active session to end")
             return
         }
         
         let endTime = Date()
         let duration = endTime.timeIntervalSince(startTime)
         
-        //      print("📊 ⏹️ Ending session: \(duration) seconds, completed: \(completed)")
         
-        let minDuration: TimeInterval = 30 // Changed from 30 to 5 for testing
+        let minDuration: TimeInterval = 30
         
         if duration >= minDuration {
             let session = ListeningSession(
@@ -731,35 +751,25 @@ class StatisticsManager: ObservableObject {
             )
             
             listeningSessions.append(session)
-            //        print("📊 ✅ Added session: \(session.episodeTitle) - \(duration)s")
-            //        print("📊 📈 Total sessions now: \(listeningSessions.count)")
             saveData()
             calculateStats()
         }
-        //     else {
-        //        print("📊 ❌ Session too short: \(duration)s < \(minDuration)s")
-        //   }
         
         currentSessionStart = nil
         currentEpisode = nil
     }
     
     func pauseSession() {
-        //     print("📊 Pausing session")
         
         // When pausing, we end current session and will start new one on resume
         endListeningSession()
     }
     
     private func calculateStats() {
-        //      print("📊 Calculating stats with \(listeningSessions.count) sessions")
-        
         guard !listeningSessions.isEmpty else {
             overallStats = nil
             podcastStats = []
             recentSessions = []
-            //        print("📊 No sessions - clearing stats")
-            
             return
         }
         
@@ -767,9 +777,6 @@ class StatisticsManager: ObservableObject {
         calculatePodcastStats()
         updateRecentSessions()
         
-        /*   if let stats = overallStats {
-         print("📊 ✅ Stats calculated - Total time: \(stats.totalListeningTime)s, Episodes: \(stats.totalEpisodes)")
-         } */
     }
     
     private func calculateOverallStats() {
@@ -1657,6 +1664,8 @@ class AudioPlayerViewModel: ObservableObject {
         
         episodeQueue.removeAll { $0.id == episode.id }
         
+        setupRemoteTransportControls()
+        
         let downloadManager = DownloadManager.shared
         let audioURL: URL
         
@@ -1807,17 +1816,7 @@ class AudioPlayerViewModel: ObservableObject {
             NotificationCenter.default.removeObserver(observer)
             routeChangeObserver = nil
         }
-        
-        // Clean up remote command handlers
-        let commandCenter = MPRemoteCommandCenter.shared()
-        commandCenter.playCommand.removeTarget(nil)
-        commandCenter.pauseCommand.removeTarget(nil)
-        commandCenter.skipForwardCommand.removeTarget(nil)
-        commandCenter.skipBackwardCommand.removeTarget(nil)
-        commandCenter.nextTrackCommand.removeTarget(nil)
-        commandCenter.previousTrackCommand.removeTarget(nil)
-        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
-        
+   
         // Clear now playing info
         clearNowPlayingInfo()
         
@@ -1854,6 +1853,24 @@ class AudioPlayerViewModel: ObservableObject {
                     if settings.skipOutroSeconds > 0 &&
                         timeRemaining <= settings.skipOutroSeconds &&
                         timeRemaining > 0.5 {
+                        // Mark as played and handle cleanup before moving to next
+                        if let episodeID = self.episode?.id {
+                            EpisodeTrackingManager.shared.markAsPlayed(episodeID)
+                            
+                            if let episode = self.episode {
+                                self.episodeCompleted[episode.audioURL] = true
+                                self.saveCompletedStatus()
+                            }
+                            
+                            if DownloadManager.shared.autoDeleteOnCompletion &&
+                                DownloadManager.shared.isDownloaded(episodeID) {
+                                print("🗑️ Auto-deleting completed episode: \(episodeID)")
+                                DownloadManager.shared.deleteDownload(episodeID)
+                            }
+                        }
+                        
+                        StatisticsManager.shared.endListeningSession(completed: true)
+                        SessionManager.shared.endCurrentEpisodeSession(completed: true)
                         // Skip to end to trigger next episode
                         self.playerDidFinishPlaying()
                     }
@@ -2437,7 +2454,8 @@ class LibraryViewModel: ObservableObject {
                         podcastImageURL: podcast.artworkUrl600,
                         description: episode.description,
                         podcastName: podcast.collectionName,
-                        episodeNumber: episode.episodeNumber
+                        episodeNumber: episode.episodeNumber,
+                        seasonNumber: episode.seasonNumber
                     )
                 }
                 
@@ -2447,9 +2465,11 @@ class LibraryViewModel: ObservableObject {
             }
         }
         
-        allEpisodes = episodes
+        if !episodes.isEmpty {
+            allEpisodes = episodes
+            saveAllEpisodes()
+        }
         isLoadingEpisodes = false
-        saveAllEpisodes()
     }
     
     var recentEpisodes: [Episode] {
@@ -2690,7 +2710,7 @@ struct HomeView: View {
                                 .padding(.horizontal)
                             
                             ScrollView(.horizontal, showsIndicators: false) {
-                                LazyHStack(spacing: 12) {
+                                HStack(spacing: 12) {
                                     ForEach(libraryVM.subscriptions.prefix(5)) { podcast in
                                         NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
                                             VStack {
@@ -2707,7 +2727,7 @@ struct HomeView: View {
                                                     .font(.caption)
                                                     .lineLimit(2)
                                                     .multilineTextAlignment(.center)
-                                                    .frame(width: 120)
+                                                    .frame(width: 120, height: 40, alignment: .top)
                                             }
                                         }
                                         .buttonStyle(PlainButtonStyle())
@@ -2742,6 +2762,7 @@ struct HomeView: View {
 struct SearchView: View {
     @StateObject var fetcher = PodcastSearchViewModel()
     @State private var searchText: String = ""
+    @FocusState private var isSearchFieldFocused: Bool
     
     var body: some View {
         NavigationStack {
@@ -2749,6 +2770,7 @@ struct SearchView: View {
                 ZStack(alignment: .trailing) {
                     TextField("Search podcasts...", text: $searchText)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .focused($isSearchFieldFocused)
                         .onSubmit {
                             Task {
                                 await fetcher.search(term: searchText)
@@ -2762,6 +2784,8 @@ struct SearchView: View {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.gray)
                                 .padding(.trailing, 8)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(PlainButtonStyle())
                         .transition(.scale.combined(with: .opacity))
@@ -2852,6 +2876,14 @@ struct SearchView: View {
                 }
             }
             .navigationTitle("Search")
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        isSearchFieldFocused = false
+                    }
+                }
+            }
         }
     }
 }
@@ -2953,6 +2985,7 @@ struct PodcastDetailView: View {
     @State private var isSelectionMode = false
     @State private var selectedEpisodes: Set<String> = []
     @State private var hideArchived = false
+    @State private var searchText = ""
     @EnvironmentObject var libraryVM: LibraryViewModel
     @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
     @ObservedObject private var sortPreferences = PodcastSortPreferences.shared
@@ -2972,13 +3005,18 @@ struct PodcastDetailView: View {
     
     var sortedAndFilteredEpisodes: [Episode] {
         let filtered = filteredEpisodes
+        // Apply search filter
+        let searchFiltered = searchText.isEmpty ? filtered : filtered.filter { episode in
+            episode.title.localizedCaseInsensitiveContains(searchText)
+        }
+        
         let sortOrder = sortPreferences.getSortOrder(for: podcast.collectionName)
         
         switch sortOrder {
         case .newestFirst:
-            return filtered.sorted { ($0.pubDate ?? Date.distantPast) > ($1.pubDate ?? Date.distantPast) }
+            return searchFiltered.sorted { ($0.pubDate ?? Date.distantPast) > ($1.pubDate ?? Date.distantPast) }
         case .oldestFirst:
-            return filtered.sorted { ($0.pubDate ?? Date.distantPast) < ($1.pubDate ?? Date.distantPast) }
+            return searchFiltered.sorted { ($0.pubDate ?? Date.distantPast) < ($1.pubDate ?? Date.distantPast) }
         }
     }
     
@@ -2994,12 +3032,16 @@ struct PodcastDetailView: View {
             contentSection
         }
         .listStyle(.plain)
+        .refreshable {
+            if let feedUrl = podcast.feedUrl {
+                await fetchEpisodes(from: feedUrl)
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             if audioVM.showMiniPlayer {
                 Color.clear.frame(height: 70)
             }
-        } // ADD
-        .navigationTitle(podcast.collectionName)
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -3072,6 +3114,27 @@ struct PodcastDetailView: View {
                     subscribeButton
                     filterButton
                 }
+                // Search Bar
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.gray)
+                    TextField("Search episodes...", text: $searchText)
+                        .textFieldStyle(PlainTextFieldStyle())
+                    
+                    if !searchText.isEmpty {
+                        Button(action: {
+                            searchText = ""
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.gray)
+                        }
+                    }
+                }
+                .padding(8)
+                .background(Color(.systemGray6))
+                .cornerRadius(8)
+                .padding(.horizontal)
+                .padding(.top, 4)
                 
                 Divider()
                     .padding(.top, 4)
@@ -3079,39 +3142,54 @@ struct PodcastDetailView: View {
             .frame(maxWidth: .infinity)
             .listRowInsets(EdgeInsets())
             .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
         }
     }
     
     private var subscribeButton: some View {
-        Button(action: {
-            if libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) {
-                libraryVM.unsubscribe(from: podcast)
-            } else {
-                libraryVM.subscribe(to: podcast)
-            }
-        }) {
-            Text(libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName }) ? "Unsubscribe" : "Subscribe")
-                .font(.subheadline)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.blue.opacity(0.1))
-                .cornerRadius(8)
-        }
-        .buttonStyle(PlainButtonStyle())
+        let isSubscribed = libraryVM.subscriptions.contains(where: { $0.collectionName == podcast.collectionName })
+          
+          return Button(action: {
+              if isSubscribed {
+                  libraryVM.unsubscribe(from: podcast)
+              } else {
+                  libraryVM.subscribe(to: podcast)
+              }
+          }) {
+              VStack(spacing: 4) {
+                  Image(systemName: isSubscribed ? "minus.circle" : "plus.circle")
+                      .font(.title2)
+                      .foregroundColor(isSubscribed ? .red : .green)
+                      .frame(height: 28)
+                  Text(isSubscribed ? "Unsubscribe" : "Subscribe")
+                      .font(.caption)
+                      .foregroundColor(.primary)
+                      .multilineTextAlignment(.center)
+                      .frame(height: 32)
+              }
+              .frame(maxWidth: .infinity)
+          }
+          .buttonStyle(PlainButtonStyle())
     }
     
     private var filterButton: some View {
         Button(action: {
-            showFilterOptions.toggle()
-        }) {
-            Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
-                .font(.subheadline)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.gray.opacity(0.1))
-                .cornerRadius(8)
-        }
-        .buttonStyle(PlainButtonStyle())
+               showFilterOptions.toggle()
+           }) {
+               VStack(spacing: 4) {
+                   Image(systemName: "line.3.horizontal.decrease.circle")
+                       .font(.title2)
+                       .foregroundColor(.blue)
+                       .frame(height: 28)
+                   Text("Filter")
+                       .font(.caption)
+                       .foregroundColor(.primary)
+                       .multilineTextAlignment(.center)
+                       .frame(height: 32)
+               }
+               .frame(maxWidth: .infinity)
+           }
+           .buttonStyle(PlainButtonStyle())
     }
     
     // MARK: - Filter Sections
@@ -3517,6 +3595,7 @@ struct EpisodeRowView: View {
     let episode: Episode
     let podcastImageURL: String?
     let onPlayTapped: (() -> Void)?
+    let showPodcastName: Bool
     
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @ObservedObject private var downloadManager = DownloadManager.shared
@@ -3530,19 +3609,51 @@ struct EpisodeRowView: View {
         audioVM.episode?.id == episode.id
     }
     
-    // Calculate available width for text
-    private var textWidth: CGFloat {
-        let screenWidth = UIScreen.main.bounds.width
-        let imageWidth: CGFloat = 65
-        let buttonWidth: CGFloat = 44
-        let spacing: CGFloat = 8
-        let listPadding: CGFloat = 32 // List padding on both sides
-        return screenWidth - imageWidth - buttonWidth - (spacing * 2) - listPadding
+    private var displayDuration: String {
+        // Check if episode has any saved progress (including current episode)
+        if let savedTime = audioVM.elapsedTimes[episode.audioURL],
+           savedTime > 0,
+           let durationStr = episode.duration {
+            
+            // Parse the duration string to get total seconds  ← SIMPLIFIED
+            let parts = durationStr.split(separator: ":").map { Int($0) ?? 0 }
+            let totalSeconds: Int
+            switch parts.count {
+            case 3:
+                totalSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+            case 2:
+                totalSeconds = parts[0] * 60 + parts[1]
+            case 1:
+                totalSeconds = parts[0]
+            default:
+                return episode.durationInMinutes ?? ""
+            }
+            
+            // Always use savedTime - it's the same variable used for playback resumption  ← SIMPLIFIED
+            let remainingSeconds = Double(totalSeconds) - savedTime
+            let roundedMinutes = Int(round(remainingSeconds / 60.0))
+            let hours = roundedMinutes / 60
+            let minutes = roundedMinutes % 60
+            
+            if hours > 0 {
+                if minutes == 0 {
+                    return "\(hours)h remaining"
+                } else {
+                    return "\(hours)h \(minutes)min remaining"
+                }
+            } else {
+                return "\(minutes)min remaining"
+            }
+        }
+        
+        // Default: show total duration
+        return episode.durationInMinutes ?? ""
     }
     
-    init(episode: Episode, podcastImageURL: String?, onPlayTapped: (() -> Void)? = nil) {
+    init(episode: Episode, podcastImageURL: String?, showPodcastName: Bool = false, onPlayTapped: (() -> Void)? = nil) {
         self.episode = episode
         self.podcastImageURL = podcastImageURL
+        self.showPodcastName = showPodcastName
         self.onPlayTapped = onPlayTapped ?? {
             if AudioPlayerViewModel.shared.episode?.id == episode.id {
                 AudioPlayerViewModel.shared.togglePlayPause()
@@ -3553,19 +3664,25 @@ struct EpisodeRowView: View {
     }
     
     var body: some View {
-        GeometryReader { geometry in
             HStack(spacing: 8) {
                 CachedAsyncImage(url: URL(string: episode.imageURL ?? podcastImageURL ?? "")) { image in
                     image.resizable().scaledToFill()
                 } placeholder: {
                     Color.gray.opacity(0.3)
                 }
-                .frame(width: 65, height: 65)
+                .frame(width: 70, height: 70)
                 .cornerRadius(8)
                 .shadow(radius: 6)
                 .opacity(trackingManager.isPlayed(episode.id) ? 0.6 : 1.0)
                 
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 2) {
+                    if showPodcastName, let podcastName = episode.podcastName {
+                        Text(podcastName)
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                            .lineLimit(1)
+                    }
+                    
                     if let seasonNumber = episode.seasonNumber, !seasonNumber.isEmpty,
                        let episodeNumber = episode.episodeNumber, !episodeNumber.isEmpty {
                         Text("S\(seasonNumber) E\(episodeNumber)")
@@ -3581,9 +3698,6 @@ struct EpisodeRowView: View {
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .lineLimit(2)
-                        .frame(maxWidth: geometry.size.width - 65 - 44 - 24, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .multilineTextAlignment(.leading)
                         .foregroundColor(isCurrentEpisode ? .blue : (trackingManager.isPlayed(episode.id) ? .gray : .primary))
                         .strikethrough(trackingManager.isPlayed(episode.id), color: .gray)
                     
@@ -3609,26 +3723,27 @@ struct EpisodeRowView: View {
                     
                     HStack(spacing: 4) {
                         if let pubDate = episode.pubDate {
-                            Text(pubDate.formatted(date: .abbreviated, time: .omitted))
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                        }
-                        
-                        if episode.pubDate != nil && episode.durationInMinutes != nil {
-                            Text("•")
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                        }
-                        
-                        if let duration = episode.durationInMinutes {
-                            Text(duration)
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                        }
+                                Text(pubDate.formatted(date: .abbreviated, time: .omitted))
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                            
+                            if episode.pubDate != nil && !displayDuration.isEmpty {
+                                Text("•")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                            
+                            if !displayDuration.isEmpty {
+                                Text(displayDuration)
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                    .id(isCurrentEpisode ? audioVM.elapsedTimes[episode.audioURL] : 0)
+                            }
                     }
+                    .lineLimit(1)
                 }
-                
-                Spacer()
+                .frame(maxWidth: .infinity, alignment: .leading)
                 
                 Button(action: {
                     onPlayTapped?()
@@ -3636,18 +3751,17 @@ struct EpisodeRowView: View {
                     Image(systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill")
                         .font(.title3)
                         .foregroundColor(.primary)
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(PlainButtonStyle())
-                .frame(width: 44)
             }
-        }
-        .frame(height: 70)
-        .swipeActions(edge: .leading) {
-            Button(action: {
-                AudioPlayerViewModel.shared.addToQueue(episode)
-            }) {
-                Label("Queue", systemImage: "text.badge.plus")
-            }
+            .padding(.vertical, 8)
+            .swipeActions(edge: .leading) {
+                Button(action: {
+                    AudioPlayerViewModel.shared.addToQueue(episode)
+                }) {
+                    Label("Queue", systemImage: "text.badge.plus")
+                }
             .tint(.blue)
         }
     }
@@ -3769,8 +3883,8 @@ struct EpisodeDetailView: View {
                     }
                 }
                 
-                // First row of buttons
-                HStack(spacing: 12) {
+                // All buttons in one row
+                HStack(spacing: 32) {
                     // Queue Button
                     Button(action: {
                         if isInQueue {
@@ -3779,13 +3893,20 @@ struct EpisodeDetailView: View {
                             audioVM.addToQueue(episode)
                         }
                     }) {
-                        Label(
-                            isInQueue ? "Remove from Queue" : "Add to Queue",
-                            systemImage: isInQueue ? "text.badge.minus" : "text.badge.plus"
-                        )
+                        VStack(spacing: 4) {
+                            Image(systemName: isInQueue ? "text.badge.minus" : "text.badge.plus")
+                                .font(.title2)
+                                .foregroundColor(isInQueue ? .red : .blue)
+                                .frame(height: 28)
+                            Text(isInQueue ? "Unqueue" : "Queue")
+                                .font(.caption)
+                                .foregroundColor(.primary)
+                                .multilineTextAlignment(.center)
+                                .frame(height: 32)
+                        }
+                        .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(isInQueue ? .red : .blue)
+                    .buttonStyle(PlainButtonStyle())
                     
                     // Download Button
                     Button(action: {
@@ -3797,26 +3918,28 @@ struct EpisodeDetailView: View {
                             downloadManager.downloadEpisode(episode)
                         }
                     }) {
-                        if isDownloading {
-                            HStack {
+                        VStack(spacing: 4) {
+                            if isDownloading {
                                 ProgressView()
                                     .progressViewStyle(CircularProgressViewStyle())
-                                    .scaleEffect(0.8)
-                                Text("\(Int(downloadProgress * 100))%")
+                                    .scaleEffect(1.2)
+                                    .frame(height: 28)
+                            } else {
+                                Image(systemName: isDownloaded ? "trash" : "arrow.down.circle")
+                                    .font(.title2)
+                                    .foregroundColor(isDownloaded ? .red : .green)
+                                    .frame(height: 28)
                             }
-                        } else {
-                            Label(
-                                isDownloaded ? "Delete Download" : "Download",
-                                systemImage: isDownloaded ? "trash" : "arrow.down.circle"
-                            )
+                            Text(isDownloading ? "\(Int(downloadProgress * 100))%" : (isDownloaded ? "Delete" : "Download"))
+                                .font(.caption)
+                                .foregroundColor(.primary)
+                                .multilineTextAlignment(.center)
+                                .frame(height: 32)
                         }
+                        .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(isDownloaded ? .red : .green)
-                }
-                
-                // Second row of buttons
-                HStack(spacing: 12) {
+                    .buttonStyle(PlainButtonStyle())
+                    
                     // Mark Played/Unplayed Button
                     Button(action: {
                         if trackingManager.isPlayed(episode.id) {
@@ -3825,26 +3948,41 @@ struct EpisodeDetailView: View {
                             trackingManager.markAsPlayed(episode.id)
                         }
                     }) {
-                        Label(
-                            trackingManager.isPlayed(episode.id) ? "Mark as Unplayed" : "Mark as Played",
-                            systemImage: trackingManager.isPlayed(episode.id) ? "circle" : "checkmark.circle.fill"
-                        )
+                        VStack(spacing: 4) {
+                            Image(systemName: trackingManager.isPlayed(episode.id) ? "circle" : "checkmark.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(trackingManager.isPlayed(episode.id) ? .gray : .green)
+                                .frame(height: 28)
+                            Text(trackingManager.isPlayed(episode.id) ? "Unplayed" : "Played")
+                                .font(.caption)
+                                .foregroundColor(.primary)
+                                .multilineTextAlignment(.center)
+                                .frame(height: 32)
+                        }
+                        .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(trackingManager.isPlayed(episode.id) ? .gray : .green)
+                    .buttonStyle(PlainButtonStyle())
                     
                     // Archive/Unarchive Button
                     Button(action: {
                         trackingManager.toggleArchived(episode.id)
                     }) {
-                        Label(
-                            trackingManager.isArchived(episode.id) ? "Unarchive" : "Archive",
-                            systemImage: trackingManager.isArchived(episode.id) ? "tray.and.arrow.up" : "archivebox"
-                        )
+                        VStack(spacing: 4) {
+                            Image(systemName: trackingManager.isArchived(episode.id) ? "tray.and.arrow.up" : "archivebox")
+                                .font(.title2)
+                                .foregroundColor(trackingManager.isArchived(episode.id) ? .blue : .orange)
+                                .frame(height: 28)
+                            Text(trackingManager.isArchived(episode.id) ? "Unarchive" : "Archive")
+                                .font(.caption)
+                                .foregroundColor(.primary)
+                                .multilineTextAlignment(.center)
+                                .frame(height: 32)
+                        }
+                        .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(trackingManager.isArchived(episode.id) ? .blue : .orange)
+                    .buttonStyle(PlainButtonStyle())
                 }
+                .padding(.horizontal)
                 
                 Divider()
                 
@@ -3873,7 +4011,11 @@ struct EpisodeDescriptionView: View {
     }
     
     private var parsedDescription: AttributedString? {
-        guard let data = htmlString.data(using: .utf8) else { return nil }
+        // Pre-process HTML to add line breaks between paragraphs
+        let processedHTML = htmlString
+            .replacingOccurrences(of: "</p>", with: "</p><br>")
+        
+        guard let data = processedHTML.data(using: .utf8) else { return nil }
         
         let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
             .documentType: NSAttributedString.DocumentType.html,
@@ -3882,18 +4024,40 @@ struct EpisodeDescriptionView: View {
         
         if let nsAttrStr = try? NSAttributedString(data: data, options: options, documentAttributes: nil),
            var swiftUIAttrStr = try? AttributedString(nsAttrStr, including: \.uiKit) {
+            
+            // Apply color and base font while preserving existing traits (bold, italic)
             for run in swiftUIAttrStr.runs {
-                swiftUIAttrStr[run.range].font = .system(size: 16)
-                if colorScheme == .dark {
-                    swiftUIAttrStr[run.range].foregroundColor = .white
+                let existingTraits = swiftUIAttrStr[run.range].uiKit.font?.fontDescriptor.symbolicTraits ?? []
+                
+                var font: UIFont
+                if existingTraits.contains(.traitBold) && existingTraits.contains(.traitItalic) {
+                    font = .systemFont(ofSize: 16, weight: .bold).italics()
+                } else if existingTraits.contains(.traitBold) {
+                    font = .systemFont(ofSize: 16, weight: .bold)
+                } else if existingTraits.contains(.traitItalic) {
+                    font = .italicSystemFont(ofSize: 16)
                 } else {
-                    swiftUIAttrStr[run.range].foregroundColor = .black
+                    font = .systemFont(ofSize: 16)
                 }
+                
+                swiftUIAttrStr[run.range].font = Font(font)
+                swiftUIAttrStr[run.range].foregroundColor = colorScheme == .dark ? .white : .black
             }
+            
             return swiftUIAttrStr
         }
         
         return nil
+    }
+}
+
+// Helper extension for italic font
+extension UIFont {
+    func italics() -> UIFont {
+        guard let descriptor = fontDescriptor.withSymbolicTraits([.traitItalic, .traitBold]) else {
+            return self
+        }
+        return UIFont(descriptor: descriptor, size: pointSize)
     }
 }
 
@@ -4173,9 +4337,11 @@ struct LibraryView: View {
     @State private var showSettings = false
     @ObservedObject private var trackingManager = EpisodeTrackingManager.shared
     
-    enum LibraryTab: String, CaseIterable {
+    enum LibraryTab: String, CaseIterable, Identifiable {
         case subscriptions = "Subscriptions"
         case newReleases = "New Releases"
+        
+        var id: String { self.rawValue }
     }
     
     var body: some View {
@@ -4183,18 +4349,25 @@ struct LibraryView: View {
             VStack(spacing: 0) {
                 // Tab Picker
                 Picker("Library Tab", selection: $selectedTab) {
-                    ForEach(LibraryTab.allCases, id: \.self) { tab in
+                    ForEach(LibraryTab.allCases) { tab in
                         Text(tab.rawValue).tag(tab)
                     }
                 }
                 .pickerStyle(SegmentedPickerStyle())
                 .padding()
                 
-                // Content
-                if selectedTab == .subscriptions {
+                TabView(selection: $selectedTab) {
                     subscriptionsView
-                } else {
+                        .tag(LibraryTab.subscriptions)
+                    
                     newReleasesView
+                        .tag(LibraryTab.newReleases)
+                }
+                .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
+            }
+            .safeAreaInset(edge: .bottom) {
+                if AudioPlayerViewModel.shared.showMiniPlayer {
+                    Color.clear.frame(height: 70)
                 }
             }
             .navigationTitle("Library")
@@ -4221,7 +4394,13 @@ struct LibraryView: View {
                                 await libraryVM.refreshAllEpisodes()
                             }
                         }) {
-                            Image(systemName: "arrow.clockwise")
+         //                   Image(systemName: "arrow.clockwise")
+                            if libraryVM.isLoadingEpisodes {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                            }
                         }
                         .disabled(libraryVM.isLoadingEpisodes)
                     }
@@ -4236,7 +4415,17 @@ struct LibraryView: View {
     
     private var subscriptionsView: some View {
         Group {
-            if libraryVM.subscriptions.isEmpty {
+            if libraryVM.isLoadingEpisodes {
+                VStack {
+                    ProgressView()
+                        .scaleEffect(1.2)
+                        .padding()
+                    Text("Loading new episodes...")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if libraryVM.subscriptions.isEmpty {
                 VStack(spacing: 16) {
                     Image(systemName: "books.vertical")
                         .font(.system(size: 50))
@@ -4294,6 +4483,9 @@ struct LibraryView: View {
                     }
                 }
                 .listStyle(.plain)
+                .refreshable {
+                    await libraryVM.refreshAllEpisodes()
+                }
             } else {
                 // Grid Layout
                 ScrollView {
@@ -4311,6 +4503,11 @@ struct LibraryView: View {
                         }
                     }
                     .padding()
+                }
+                .refreshable {
+                    Task {
+                        await libraryVM.refreshAllEpisodes()
+                    }
                 }
             }
         }
@@ -4371,7 +4568,8 @@ struct LibraryView: View {
                     ForEach(libraryVM.recentEpisodes.filter { !trackingManager.isPlayed($0.id) && trackingManager.shouldShowEpisode($0.id) }) { episode in
                         EpisodeRowView(
                             episode: episode,
-                            podcastImageURL: episode.podcastImageURL
+                            podcastImageURL: episode.podcastImageURL,
+                            showPodcastName: true
                         )
                         .padding(.vertical, 4)
                         .contentShape(Rectangle())
@@ -4400,7 +4598,9 @@ struct LibraryView: View {
                 }
                 .listStyle(.plain)
                 .refreshable {
-                    await libraryVM.refreshAllEpisodes()
+                    Task{
+                        await libraryVM.refreshAllEpisodes()
+                    }
                 }
             }
         }
@@ -4642,6 +4842,11 @@ struct StatisticsView: View {
                         .tag(StatsTab.sessions)
                 }
                 .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
+            }
+            .safeAreaInset(edge: .bottom) {
+                if AudioPlayerViewModel.shared.showMiniPlayer {
+                    Color.clear.frame(height: 70)
+                }
             }
             .navigationTitle("Statistics")
             .toolbar {
