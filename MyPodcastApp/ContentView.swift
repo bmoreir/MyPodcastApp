@@ -1680,7 +1680,6 @@ class AudioPlayerViewModel: ObservableObject {
             
             if let attributes = try? FileManager.default.attributesOfItem(atPath: localURL.path) {
                 let fileSize = attributes[.size] as? Int64 ?? 0
-                print("📁 File size: \(fileSize) bytes")
             }
             
             audioURL = localURL
