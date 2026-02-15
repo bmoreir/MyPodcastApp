@@ -467,6 +467,7 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
     
     @State private var cachedImage: UIImage?
     @State private var shouldUseCached = false
+    @State private var cachingTask: Task<Void, Never>?
     
     init(
         url: URL?,
@@ -526,18 +527,18 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
     
     private func cacheImageFromAsyncImage() {
         guard let url = url else { return }
-        
-        // Download and cache in background
-        Task {
+        cachingTask?.cancel()
+
+        cachingTask = Task { @MainActor in
             do {
                 let (data, _) = try await URLSession.shared.data(from: url)
                 if let image = UIImage(data: data) {
-                    await MainActor.run {
-                        ImageCache.shared.setImage(image, for: url.absoluteString)
-                    }
+                    // Only cache if this view still exists and URL hasn't changed
+                    guard self.url == url else { return }
+                    ImageCache.shared.setImage(image, for: url.absoluteString)
                 }
             } catch {
-                // Ignore caching errors
+                // Ignore caching errors (e.g., cancelled, network issues)
             }
         }
     }
@@ -642,7 +643,7 @@ struct ListeningSession: Codable {
     let startTime: Date
     let endTime: Date
     let duration: TimeInterval // in seconds
-    let completed: Bool // whether episode was finished
+    let completed: Bool
 }
 
 //MARK: - PodcastStats
@@ -674,8 +675,9 @@ struct OverallStats: Codable {
     let longestSession: TimeInterval
     let completionRate: Double
     let firstListenDate: Date?
-    let streakDays: Int // consecutive days with listening
-    let favoriteListeningHour: Int // hour of day (0-23)
+    let streakDays: Int
+    let longestStreakDays: Int
+    let favoriteListeningHour: Int
     
     var totalListeningTimeFormatted: String {
         return DurationFormatter.formatDuration(totalListeningTime)
@@ -697,7 +699,8 @@ class StatisticsManager: ObservableObject {
     @Published var overallStats: OverallStats?
     @Published var podcastStats: [PodcastStats] = []
     @Published var recentSessions: [ListeningSession] = []
-    
+    private var completedEpisodes: Set<String> = [] // Store episode IDs that were completed
+    private let completedEpisodesKey = "completedEpisodes"
     private var listeningSessions: [ListeningSession] = []
     private var currentSessionStart: Date?
     private var currentEpisode: Episode?
@@ -707,7 +710,33 @@ class StatisticsManager: ObservableObject {
     
     private init() {
         loadData()
+        loadCompletedEpisodes()
         calculateStats()
+    }
+    
+    private func loadCompletedEpisodes() {
+        if let data = UserDefaults.standard.data(forKey: completedEpisodesKey),
+           let decoded = try? JSONDecoder().decode(Set<String>.self, from: data) {
+            completedEpisodes = decoded
+        }
+    }
+
+    private func saveCompletedEpisodes() {
+        if let data = try? JSONEncoder().encode(completedEpisodes) {
+            UserDefaults.standard.set(data, forKey: completedEpisodesKey)
+        }
+    }
+
+    // Add method to mark episode as completed
+    func markEpisodeCompleted(_ episodeID: String) {
+        completedEpisodes.insert(episodeID)
+        saveCompletedEpisodes()
+        calculateStats()
+    }
+
+    // Check if episode was ever completed
+    func isEpisodeCompleted(_ episodeID: String) -> Bool {
+        return completedEpisodes.contains(episodeID)
     }
     
     func startListeningSession(for episode: Episode) {
@@ -765,7 +794,7 @@ class StatisticsManager: ObservableObject {
         endListeningSession()
     }
     
-    private func calculateStats() {
+    func calculateStats() {
         guard !listeningSessions.isEmpty else {
             overallStats = nil
             podcastStats = []
@@ -787,12 +816,15 @@ class StatisticsManager: ObservableObject {
         let averageSession = totalTime / Double(listeningSessions.count)
         let longestSession = listeningSessions.max { $0.duration < $1.duration }?.duration ?? 0
         
-        let completedSessions = listeningSessions.filter { $0.completed }.count
-        let completionRate = Double(completedSessions) / Double(listeningSessions.count) * 100
+        let uniqueEpisodeIDs = Set(listeningSessions.map { $0.episodeID })
+        let completedCount = uniqueEpisodeIDs.filter { completedEpisodes.contains($0) }.count
+        let completionRate = uniqueEpisodes > 0 ?
+        Double(completedCount) / Double(uniqueEpisodes) * 100 : 0
         
         let firstListen = listeningSessions.min { $0.startTime < $1.startTime }?.startTime
         
         let streak = calculateStreak()
+        let longestStreak = calculateLongestStreak()
         let favoriteHour = calculateFavoriteListeningHour()
         
         overallStats = OverallStats(
@@ -804,6 +836,7 @@ class StatisticsManager: ObservableObject {
             completionRate: completionRate,
             firstListenDate: firstListen,
             streakDays: streak,
+            longestStreakDays: longestStreak,
             favoriteListeningHour: favoriteHour
         )
     }
@@ -813,11 +846,13 @@ class StatisticsManager: ObservableObject {
         
         podcastStats = podcastGroups.map { (podcastName, sessions) in
             let totalTime = sessions.reduce(0) { $0 + $1.duration }
+            let uniqueEpisodeIDs = Set(sessions.map { $0.episodeID })
             let episodeCount = Set(sessions.map { $0.episodeID }).count
             let averageTime = totalTime / Double(sessions.count)
             
-            let completed = sessions.filter { $0.completed }.count
-            let completionRate = Double(completed) / Double(sessions.count) * 100
+            let completedCount = uniqueEpisodeIDs.filter { completedEpisodes.contains($0) }.count
+            let completionRate = episodeCount > 0 ?
+            Double(completedCount) / Double(episodeCount) * 100 : 0
             
             let firstListen = sessions.min { $0.startTime < $1.startTime }?.startTime ?? Date()
             let lastListen = sessions.max { $0.startTime < $1.startTime }?.startTime ?? Date()
@@ -839,11 +874,38 @@ class StatisticsManager: ObservableObject {
     }
     
     private func calculateStreak() -> Int {
+        guard !listeningSessions.isEmpty else { return 0 }
+        
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         
+        // Check if there's listening activity today
+        let hasListeningToday = listeningSessions.contains { session in
+            calendar.isDate(session.startTime, inSameDayAs: today)
+        }
+        
+        // Start from today if there's activity, otherwise start from yesterday
+        var currentDate: Date
+        if hasListeningToday {
+            currentDate = today
+        } else if let yesterday = calendar.date(byAdding: .day, value: -1, to: today) {
+            // Check if there's listening yesterday
+            let hasListeningYesterday = listeningSessions.contains { session in
+                calendar.isDate(session.startTime, inSameDayAs: yesterday)
+            }
+            
+            // If no listening yesterday either, streak is broken
+            if !hasListeningYesterday {
+                return 0
+            }
+            
+            currentDate = yesterday
+        } else {
+            return 0
+        }
+        
+        // Count consecutive days backwards
         var streak = 0
-        var currentDate = today
         
         while true {
             let hasListeningOnDate = listeningSessions.contains { session in
@@ -852,13 +914,49 @@ class StatisticsManager: ObservableObject {
             
             if hasListeningOnDate {
                 streak += 1
-                currentDate = calendar.date(byAdding: .day, value: -1, to: currentDate) ?? currentDate
+                if let previousDay = calendar.date(byAdding: .day, value: -1, to: currentDate) {
+                    currentDate = previousDay
+                } else {
+                    break
+                }
             } else {
                 break
             }
         }
         
         return streak
+    }
+    
+    private func calculateLongestStreak() -> Int {
+        guard !listeningSessions.isEmpty else { return 0 }
+        
+        let calendar = Calendar.current
+        
+        // Get all unique days with listening activity
+        let daysWithListening = Set(listeningSessions.map { session in
+            calendar.startOfDay(for: session.startTime)
+        }).sorted()
+        
+        guard !daysWithListening.isEmpty else { return 0 }
+        
+        var longestStreak = 1
+        var currentStreak = 1
+        
+        for i in 1..<daysWithListening.count {
+            let previousDay = daysWithListening[i - 1]
+            let currentDay = daysWithListening[i]
+            
+            // Check if current day is exactly one day after previous day
+            if let nextDay = calendar.date(byAdding: .day, value: 1, to: previousDay),
+               calendar.isDate(nextDay, inSameDayAs: currentDay) {
+                currentStreak += 1
+                longestStreak = max(longestStreak, currentStreak)
+            } else {
+                currentStreak = 1
+            }
+        }
+        
+        return longestStreak
     }
     
     private func calculateFavoriteListeningHour() -> Int {
@@ -930,15 +1028,18 @@ class StatisticsManager: ObservableObject {
             .reduce(0) { $0 + $1.duration }
     }
     
+    @MainActor
     func clearAllStats() {
         listeningSessions.removeAll()
+        completedEpisodes.removeAll()
         saveData()
+        saveCompletedEpisodes()
         calculateStats()
+        SessionManager.shared.clearAllSessions()
     }
 }
 
 // MARK: - SessionManager
-
 @MainActor
 class SessionManager: ObservableObject {
     static let shared = SessionManager()
@@ -1010,7 +1111,9 @@ class SessionManager: ObservableObject {
     
     func pauseEpisodeInSession() {
         guard let startTime = episodeStartTime else { return }
-        
+        pauseTimer?.invalidate()
+        pauseTimer = nil
+
         // Update episode duration
         if var episodeSession = currentEpisodeSession {
             let duration = Date().timeIntervalSince(startTime)
@@ -1020,7 +1123,6 @@ class SessionManager: ObservableObject {
         }
         
         // Start pause timer - if not resumed within threshold, end session
-        pauseTimer?.invalidate()
         pauseTimer = Timer.scheduledTimer(withTimeInterval: pauseThreshold, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 print("Pause threshold exceeded - ending session")
@@ -1035,6 +1137,10 @@ class SessionManager: ObservableObject {
         // Cancel pause timer
         pauseTimer?.invalidate()
         pauseTimer = nil
+        
+        if currentSession == nil {
+            startSession()
+        }
         
         // Resume episode timing
         episodeStartTime = Date()
@@ -1094,6 +1200,22 @@ class SessionManager: ObservableObject {
         currentSession = nil
     }
     
+    func clearAllSessions() {
+        // End current session if active
+        if currentSession != nil {
+            endSession()
+        }
+        
+        // Clear all saved sessions
+        userSessions.removeAll()
+        saveSessions()
+        
+        // Reset session counter
+        UserDefaults.standard.set(0, forKey: sessionNumberKey)
+        
+        print("✅ Cleared all session data")
+    }
+    
     // MARK: - Persistence
     
     private func saveSessions() {
@@ -1145,7 +1267,7 @@ struct EpisodeSession: Identifiable, Codable, Hashable {
     var endTime: Date
     let completed: Bool
 }
-
+/*
 //MARK: - TaskMapper (Thread-safe mapping)
 actor TaskMapper {
     private var mapping: [ObjectIdentifier: String] = [:]
@@ -1161,7 +1283,7 @@ actor TaskMapper {
     func removeEpisodeID(for task: URLSessionDownloadTask) {
         mapping.removeValue(forKey: ObjectIdentifier(task))
     }
-}
+} */
 
 //MARK: - DownloadManager
 @MainActor
@@ -1171,33 +1293,36 @@ class DownloadManager: NSObject, ObservableObject {
     @Published var downloadedEpisodes: Set<String> = []
     @Published var downloadProgress: [String: Double] = [:]
     @Published var activeDownloads: Set<String> = []
-    @Published var autoDeleteOnCompletion: Bool = false  // ADD THIS
+    @Published var autoDeleteOnCompletion: Bool = false
     
     private let downloadedEpisodesKey = "downloadedEpisodes"
-    private let autoDeleteKey = "autoDeleteOnCompletion"  // ADD THIS
+    private let autoDeleteKey = "autoDeleteOnCompletion"
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
-    private let taskMapper = TaskMapper()
+    
+    // CHANGE: Make these nonisolated with their own synchronization
+    nonisolated(unsafe) private var taskToEpisodeMapping: [ObjectIdentifier: String] = [:]
+    private let mappingQueue = DispatchQueue(label: "com.mypodcastapp.downloadmapping")
     
     private lazy var downloadSession: URLSession = {
         let config = URLSessionConfiguration.background(withIdentifier: "com.mypodcastapp.downloads")
         config.isDiscretionary = false
         config.sessionSendsLaunchEvents = true
+        config.timeoutIntervalForRequest = 60 // 60 seconds for initial connection
+        config.timeoutIntervalForResource = 3600 // 1 hour for entire download
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
     
     private override init() {
         super.init()
         loadDownloadedEpisodes()
-        loadAutoDeleteSetting()  // ADD THIS
+        loadAutoDeleteSetting()
         createDownloadsDirectory()
     }
     
-    // ADD THIS METHOD
     private func loadAutoDeleteSetting() {
         autoDeleteOnCompletion = UserDefaults.standard.bool(forKey: autoDeleteKey)
     }
     
-    // ADD THIS METHOD
     func setAutoDelete(_ enabled: Bool) {
         autoDeleteOnCompletion = enabled
         UserDefaults.standard.set(enabled, forKey: autoDeleteKey)
@@ -1229,9 +1354,8 @@ class DownloadManager: NSObject, ObservableObject {
         let task = downloadSession.downloadTask(with: url)
         downloadTasks[episode.id] = task
         
-        Task {
-            await taskMapper.setEpisodeID(episode.id, for: task)
-        }
+        // Store mapping - use helper method
+        setEpisodeID(episode.id, for: task)
         
         task.resume()
         
@@ -1245,7 +1369,7 @@ class DownloadManager: NSObject, ObservableObject {
         Task { @MainActor in
             let audioVM = AudioPlayerViewModel.shared
             if audioVM.episode?.id == episodeID && audioVM.isPlaying {
-                audioVM.togglePlayPause() // Stop playback
+                audioVM.togglePlayPause()
                 print("⏹️ Stopped playback of deleted episode")
             }
             
@@ -1260,9 +1384,8 @@ class DownloadManager: NSObject, ObservableObject {
     func cancelDownload(_ episodeID: String) {
         if let task = downloadTasks[episodeID] {
             task.cancel()
-            Task {
-                await taskMapper.removeEpisodeID(for: task)
-            }
+            // Remove mapping
+            removeEpisodeID(for: task)
         }
         downloadTasks.removeValue(forKey: episodeID)
         activeDownloads.remove(episodeID)
@@ -1286,7 +1409,6 @@ class DownloadManager: NSObject, ObservableObject {
     }
     
     nonisolated private func sanitizeFilename(for episodeID: String) -> String {
-        // Create a hash of the episode ID for a clean filename
         let hash = episodeID.hash
         return "\(abs(hash)).mp3"
     }
@@ -1298,30 +1420,39 @@ class DownloadManager: NSObject, ObservableObject {
         let filename = sanitizeFilename(for: episodeID)
         return documentsPath.appendingPathComponent("Downloads").appendingPathComponent(filename)
     }
+    
+    // MARK: - Thread-safe mapping helpers
+    
+    nonisolated private func setEpisodeID(_ episodeID: String, for task: URLSessionDownloadTask) {
+        mappingQueue.sync {
+            taskToEpisodeMapping[ObjectIdentifier(task)] = episodeID
+        }
+    }
+    
+    nonisolated private func getEpisodeID(for task: URLSessionDownloadTask) -> String? {
+        return mappingQueue.sync {
+            taskToEpisodeMapping[ObjectIdentifier(task)]
+        }
+    }
+    
+    nonisolated private func removeEpisodeID(for task: URLSessionDownloadTask) {
+        mappingQueue.sync {
+            _ = taskToEpisodeMapping.removeValue(forKey: ObjectIdentifier(task))
+        }
+    }
 }
 
 // MARK: - URLSessionDownloadDelegate
 extension DownloadManager: URLSessionDownloadDelegate {
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        // Create a semaphore to wait for the async task
-        let semaphore = DispatchSemaphore(value: 0)
-        var episodeID: String?
-        
-        Task {
-            episodeID = await taskMapper.getEpisodeID(for: downloadTask)
-            semaphore.signal()
-        }
-        
-        // Wait for the async task to complete (with timeout)
-        _ = semaphore.wait(timeout: .now() + 5)
-        
-        guard let unwrappedEpisodeID = episodeID,
-              let destinationURL = getDownloadPath(for: unwrappedEpisodeID) else {
+        // Get episode ID synchronously
+        guard let episodeID = getEpisodeID(for: downloadTask),
+              let destinationURL = getDownloadPath(for: episodeID) else {
             print("Failed to get episodeID or destination path")
             return
         }
         
-        print("Download finished for: \(unwrappedEpisodeID)")
+        print("Download finished for: \(episodeID)")
         print("Moving from: \(location)")
         print("Moving to: \(destinationURL)")
         
@@ -1337,53 +1468,49 @@ extension DownloadManager: URLSessionDownloadDelegate {
             print("File moved successfully")
             
             Task { @MainActor in
-                self.downloadedEpisodes.insert(unwrappedEpisodeID)
-                self.activeDownloads.remove(unwrappedEpisodeID)
-                self.downloadProgress.removeValue(forKey: unwrappedEpisodeID)
-                self.downloadTasks.removeValue(forKey: unwrappedEpisodeID)
+                self.downloadedEpisodes.insert(episodeID)
+                self.activeDownloads.remove(episodeID)
+                self.downloadProgress.removeValue(forKey: episodeID)
+                self.downloadTasks.removeValue(forKey: episodeID)
                 self.saveDownloadedEpisodes()
                 print("Download completed and saved")
             }
             
-            Task {
-                await taskMapper.removeEpisodeID(for: downloadTask)
-            }
+            // Clean up mapping
+            removeEpisodeID(for: downloadTask)
         } catch {
             print("Error moving downloaded file: \(error)")
         }
     }
     
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        Task {
-            guard let episodeID = await taskMapper.getEpisodeID(for: downloadTask) else {
-                return
-            }
-            
-            let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-            
-            await MainActor.run {
-                self.downloadProgress[episodeID] = progress
-            }
+        guard let episodeID = getEpisodeID(for: downloadTask) else {
+            return
+        }
+        
+        let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        
+        Task { @MainActor in
+            self.downloadProgress[episodeID] = progress
         }
     }
     
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let downloadTask = task as? URLSessionDownloadTask else { return }
+        guard let episodeID = getEpisodeID(for: downloadTask) else {
+            return
+        }
         
-        Task {
-            guard let episodeID = await taskMapper.getEpisodeID(for: downloadTask) else {
-                return
+        if let error = error {
+            print("Download failed for \(episodeID): \(error)")
+            Task { @MainActor in
+                self.activeDownloads.remove(episodeID)
+                self.downloadProgress.removeValue(forKey: episodeID)
+                self.downloadTasks.removeValue(forKey: episodeID)
             }
             
-            if let error = error {
-                print("Download failed for \(episodeID): \(error)")
-                await MainActor.run {
-                    self.activeDownloads.remove(episodeID)
-                    self.downloadProgress.removeValue(forKey: episodeID)
-                    self.downloadTasks.removeValue(forKey: episodeID)
-                }
-                await taskMapper.removeEpisodeID(for: downloadTask)
-            }
+            // Clean up mapping
+            removeEpisodeID(for: downloadTask)
         }
     }
 }
@@ -1408,6 +1535,11 @@ class EpisodeTrackingManager: ObservableObject {
     private let statusesKey = "episodeStatuses"
     private let hidePlayedKey = "hidePlayedEpisodes"
     private let hideArchivedKey = "hideArchivedEpisodes"
+    
+    private var statusesFileURL: URL {
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documentsPath.appendingPathComponent("episodeStatuses.json")
+    }
     
     private init() {
         loadStatuses()
@@ -1525,17 +1657,22 @@ class EpisodeTrackingManager: ObservableObject {
     }
     
     // MARK: - Persistence
-    
     private func saveStatuses() {
-        if let data = try? JSONEncoder().encode(episodeStatuses) {
-            UserDefaults.standard.set(data, forKey: statusesKey)
+        do {
+            let data = try JSONEncoder().encode(episodeStatuses)
+            try data.write(to: statusesFileURL, options: .atomic)
+        } catch {
+            print("❌ Failed to save episode statuses: \(error)")
         }
     }
     
     private func loadStatuses() {
-        if let data = UserDefaults.standard.data(forKey: statusesKey),
-           let decoded = try? JSONDecoder().decode([String: EpisodeStatus].self, from: data) {
-            episodeStatuses = decoded
+        do {
+            let data = try Data(contentsOf: statusesFileURL)
+            episodeStatuses = try JSONDecoder().decode([String: EpisodeStatus].self, from: data)
+        } catch {
+            print("⚠️ No episode statuses found or failed to load: \(error)")
+            episodeStatuses = [:]
         }
     }
     
@@ -1609,7 +1746,7 @@ class AudioPlayerViewModel: ObservableObject {
     static let shared = AudioPlayerViewModel()
     private let elapsedTimesKey = "episodeElapsedTimes"
     private let playbackSpeedKey = "playbackSpeed"
-    private let completedKey = "episodeCompleted"  // ADD THIS
+    private let completedKey = "episodeCompleted"
     
     private var timeObserverToken: Any?
     private var player: AVPlayer?
@@ -1629,7 +1766,7 @@ class AudioPlayerViewModel: ObservableObject {
     @Published var playbackSpeed: Float = 1.0
     
     @Published private(set) var elapsedTimes: [String: Double] = [:]
-    @Published private(set) var episodeCompleted: [String: Bool] = [:]  // ADD THIS
+    @Published private(set) var episodeCompleted: [String: Bool] = [:]
     
     var showMiniPlayer: Bool {
         episode != nil && (isPlaying || currentTime > 0)
@@ -1668,27 +1805,18 @@ class AudioPlayerViewModel: ObservableObject {
         
         let downloadManager = DownloadManager.shared
         let audioURL: URL
-        
-        print("🎵 Loading episode: \(episode.title)")
-        print("📱 Episode ID: \(episode.id)")
-        print("🔍 Is downloaded: \(downloadManager.isDownloaded(episode.id))")
-        
+                
         if downloadManager.isDownloaded(episode.id),
            let localURL = downloadManager.getLocalURL(for: episode.id) {
-            print("📁 Local URL: \(localURL)")
-            print("📁 File exists: \(FileManager.default.fileExists(atPath: localURL.path))")
             
             if let attributes = try? FileManager.default.attributesOfItem(atPath: localURL.path) {
                 let fileSize = attributes[.size] as? Int64 ?? 0
+                print("📁 File size: \(fileSize) bytes")
             }
-            
             audioURL = localURL
-            print("✅ Playing from local download: \(episode.title)")
         } else if let url = URL(string: episode.audioURL) {
             audioURL = url
-            print("🌐 Streaming: \(episode.title)")
         } else {
-            print("❌ No valid URL found")
             return
         }
         
@@ -1699,6 +1827,8 @@ class AudioPlayerViewModel: ObservableObject {
         updateDurationFromAsset(asset)
         self.isPlaying = false
         
+        print("👀 Setting up observer for player item: \(playerItem)")
+
         setupPlayerItemObserver(for: playerItem)
         
         // Check player item status after a brief delay
@@ -1706,7 +1836,6 @@ class AudioPlayerViewModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             
             if let item = self.player?.currentItem {
-                print("Player item status: \(item.status.rawValue)")
                 if let error = item.error {
                     print("❌ Player error: \(error.localizedDescription)")
                 }
@@ -1751,8 +1880,7 @@ class AudioPlayerViewModel: ObservableObject {
             saveCompletedStatus()
         } else if let savedTime = elapsedTimes[episode.audioURL], savedTime > 0 {
             // Episode in progress, resume from saved position
-            let adjustedTime = savedTime + settings.skipIntroSeconds
-            let cmTime = CMTime(seconds: adjustedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+            let cmTime = CMTime(seconds: savedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
             player?.seek(to: cmTime)
         } else if settings.skipIntroSeconds > 0 {
             // First time playing, skip intro
@@ -1794,9 +1922,14 @@ class AudioPlayerViewModel: ObservableObject {
             forName: .AVPlayerItemDidPlayToEndTime,
             object: playerItem,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             Task { @MainActor in
-                self?.playerDidFinishPlaying()
+                guard let self = self,
+                      let notificationItem = notification.object as? AVPlayerItem,
+                      notificationItem == self.currentPlayerItem else {
+                    return
+                }
+                self.playerDidFinishPlaying()
             }
         }
     }
@@ -1835,6 +1968,11 @@ class AudioPlayerViewModel: ObservableObject {
     private func addPeriodicTimeObserver() {
         guard let player = player else { return }
         
+        if let token = timeObserverToken {
+                player.removeTimeObserver(token)
+                timeObserverToken = nil
+            }
+        
         let interval = CMTime(seconds: 1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             DispatchQueue.main.async {
@@ -1855,6 +1993,7 @@ class AudioPlayerViewModel: ObservableObject {
                         // Mark as played and handle cleanup before moving to next
                         if let episodeID = self.episode?.id {
                             EpisodeTrackingManager.shared.markAsPlayed(episodeID)
+                            StatisticsManager.shared.markEpisodeCompleted(episodeID)
                             
                             if let episode = self.episode {
                                 self.episodeCompleted[episode.audioURL] = true
@@ -1863,7 +2002,6 @@ class AudioPlayerViewModel: ObservableObject {
                             
                             if DownloadManager.shared.autoDeleteOnCompletion &&
                                 DownloadManager.shared.isDownloaded(episodeID) {
-                                print("🗑️ Auto-deleting completed episode: \(episodeID)")
                                 DownloadManager.shared.deleteDownload(episodeID)
                             }
                         }
@@ -1965,10 +2103,13 @@ class AudioPlayerViewModel: ObservableObject {
     
     private func playerDidFinishPlaying() {
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self else {
+                return
+            }
             
             if let episodeID = self.episode?.id {
                 EpisodeTrackingManager.shared.markAsPlayed(episodeID)
+                StatisticsManager.shared.markEpisodeCompleted(episodeID)
                 
                 if let episode = self.episode {
                     self.episodeCompleted[episode.audioURL] = true
@@ -1977,7 +2118,6 @@ class AudioPlayerViewModel: ObservableObject {
                 
                 if DownloadManager.shared.autoDeleteOnCompletion &&
                     DownloadManager.shared.isDownloaded(episodeID) {
-                    print("🗑️ Auto-deleting completed episode: \(episodeID)")
                     DownloadManager.shared.deleteDownload(episodeID)
                 }
             }
@@ -2027,14 +2167,17 @@ class AudioPlayerViewModel: ObservableObject {
             UserDefaults.standard.set(data, forKey: elapsedTimesKey)
         }
     }
-    
+
     private func savePlaybackProgress() {
         if let current = self.episode {
             elapsedTimes[current.audioURL] = currentTime
-            saveTimer?.invalidate()
-            saveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-                Task {@MainActor in
-                    self?.saveElapsedTimes()
+            
+            if saveTimer == nil {
+                saveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.saveElapsedTimes()
+                        self?.saveTimer = nil
+                    }
                 }
             }
         }
@@ -2105,6 +2248,7 @@ class AudioPlayerViewModel: ObservableObject {
         }
     }
     
+    @MainActor
     private func handleAudioSessionInterruption(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -2141,6 +2285,7 @@ class AudioPlayerViewModel: ObservableObject {
         }
     }
     
+    @MainActor
     private func handleAudioRouteChange(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
@@ -2391,6 +2536,11 @@ class LibraryViewModel: ObservableObject {
     private let showBadgesKey = "showUnplayedBadges"
     private let allEpisodesKey = "allEpisodesCache"
     
+    private var allEpisodesFileURL: URL {
+            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            return documentsPath.appendingPathComponent("allEpisodesCache.json")
+        }
+    
     init() {
         loadSubscriptions()
         loadPreferences()
@@ -2438,7 +2588,12 @@ class LibraryViewModel: ObservableObject {
             }
             
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                // Add timeout configuration
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 30 // 30 seconds timeout
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                
+                let (data, _) = try await URLSession.shared.data(for: request)
                 let parser = RSSParser()
                 let podcastEpisodes = parser.parse(data: data)
                 
@@ -2460,7 +2615,13 @@ class LibraryViewModel: ObservableObject {
                 
                 episodes.append(contentsOf: episodesWithPodcastInfo)
             } catch {
-                print("Failed to fetch episodes for \(podcast.collectionName): \(error)")
+                // Log error but continue with other podcasts
+                let nsError = error as NSError
+                if nsError.code == NSURLErrorTimedOut {
+                    print("⏱️ Timeout fetching episodes for \(podcast.collectionName)")
+                } else {
+                    print("❌ Failed to fetch episodes for \(podcast.collectionName): \(error.localizedDescription)")
+                }
             }
         }
         
@@ -2494,17 +2655,26 @@ class LibraryViewModel: ObservableObject {
             subscriptions = decoded
         }
     }
-    
+
     private func saveAllEpisodes() {
-        if let data = try? JSONEncoder().encode(allEpisodes) {
-            UserDefaults.standard.set(data, forKey: allEpisodesKey)
+        do {
+            let data = try JSONEncoder().encode(allEpisodes)
+            try data.write(to: allEpisodesFileURL, options: .atomic)
+            print("✅ Saved \(allEpisodes.count) episodes to file (\(data.count) bytes)")
+        } catch {
+            print("❌ Failed to save episodes: \(error)")
         }
     }
     
+    // REPLACE loadAllEpisodes():
     private func loadAllEpisodes() {
-        if let data = UserDefaults.standard.data(forKey: allEpisodesKey),
-           let decoded = try? JSONDecoder().decode([Episode].self, from: data) {
-            allEpisodes = decoded
+        do {
+            let data = try Data(contentsOf: allEpisodesFileURL)
+            allEpisodes = try JSONDecoder().decode([Episode].self, from: data)
+            print("✅ Loaded \(allEpisodes.count) episodes from file")
+        } catch {
+            print("⚠️ No cached episodes found or failed to load: \(error)")
+            allEpisodes = []
         }
     }
     
@@ -2513,8 +2683,29 @@ class LibraryViewModel: ObservableObject {
         case .dateAdded:
             return subscriptions // Keep original order (date added)
         case .alphabetical:
-            return subscriptions.sorted { $0.collectionName.lowercased() < $1.collectionName.lowercased() }
+            return subscriptions.sorted {
+                stripLeadingArticles($0.collectionName).lowercased() < stripLeadingArticles($1.collectionName).lowercased()
+            }
         }
+    }
+
+    // Add this helper function to LibraryViewModel
+    private func stripLeadingArticles(_ title: String) -> String {
+        let trimmed = title.trimmingCharacters(in: .whitespaces)
+        let lowercased = trimmed.lowercased()
+        
+        // Check for common articles at the beginning
+        let articles = ["the ", "a ", "an "]
+        
+        for article in articles {
+            if lowercased.hasPrefix(article) {
+                // Return the string without the article
+                let index = trimmed.index(trimmed.startIndex, offsetBy: article.count)
+                return String(trimmed[index...])
+            }
+        }
+        
+        return trimmed
     }
     
     func getUnplayedCount(for podcast: Podcast) -> Int {
@@ -2669,7 +2860,24 @@ struct ContentView: View {
                 )
             }
         }
+        .onAppear {
+            cleanupOldUserDefaults()
+        }
     }
+    
+    private func cleanupOldUserDefaults() {
+            let defaults = UserDefaults.standard
+            
+            if defaults.object(forKey: "allEpisodesCache") != nil {
+                defaults.removeObject(forKey: "allEpisodesCache")
+                print("🧹 Cleaned up old allEpisodesCache from UserDefaults")
+            }
+            
+            if defaults.object(forKey: "episodeStatuses") != nil {
+                defaults.removeObject(forKey: "episodeStatuses")
+                print("🧹 Cleaned up old episodeStatuses from UserDefaults")
+            }
+        }
 }
 
 //MARK: - HomeView
@@ -3506,6 +3714,8 @@ struct PodcastDetailView: View {
     }
     
     func selectAllAbove(index: Int) {
+        guard index < sortedAndFilteredEpisodes.count else { return }
+
         for i in 0...index {
             if i < sortedAndFilteredEpisodes.count {
                 selectedEpisodes.insert(sortedAndFilteredEpisodes[i].id)
@@ -3514,6 +3724,8 @@ struct PodcastDetailView: View {
     }
     
     func selectAllBelow(index: Int) {
+        guard index < sortedAndFilteredEpisodes.count else { return }
+
         for i in index..<sortedAndFilteredEpisodes.count {
             selectedEpisodes.insert(sortedAndFilteredEpisodes[i].id)
         }
@@ -3538,13 +3750,23 @@ struct PodcastDetailView: View {
         loadingError = nil
         
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            // Add timeout configuration
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 30 // 30 seconds timeout
+            request.cachePolicy = .reloadIgnoringLocalCacheData // Ensure fresh data
+            
+            let (data, response) = try await URLSession.shared.data(for: request)
             
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 404 {
                     isLoadingEpisodes = false
                     hasLoadedEpisodes = true
                     loadingError = "Podcast feed not found (404). This feed may have been moved or deleted."
+                    return
+                } else if httpResponse.statusCode >= 500 {
+                    isLoadingEpisodes = false
+                    hasLoadedEpisodes = true
+                    loadingError = "Server error (\(httpResponse.statusCode)). The podcast server is experiencing issues. Please try again later."
                     return
                 } else if httpResponse.statusCode >= 400 {
                     isLoadingEpisodes = false
@@ -3578,13 +3800,33 @@ struct PodcastDetailView: View {
             isLoadingEpisodes = false
             hasLoadedEpisodes = true
             
-            if (error as NSError).code == NSURLErrorNotConnectedToInternet {
+            let nsError = error as NSError
+            
+            // Handle specific error types
+            switch nsError.code {
+            case NSURLErrorTimedOut:
+                loadingError = "Request timed out. The podcast feed is taking too long to respond. Please check your connection and try again."
+                
+            case NSURLErrorNotConnectedToInternet:
                 loadingError = "No internet connection. Please check your network and try again."
-            } else if (error as NSError).code == NSURLErrorTimedOut {
-                loadingError = "Request timed out. Please try again."
-            } else {
+                
+            case NSURLErrorNetworkConnectionLost:
+                loadingError = "Network connection lost. Please check your connection and try again."
+                
+            case NSURLErrorCannotConnectToHost:
+                loadingError = "Cannot connect to the podcast server. The server may be down or unreachable."
+                
+            case NSURLErrorDNSLookupFailed:
+                loadingError = "Cannot find the podcast server. Please check the feed URL."
+                
+            case NSURLErrorBadServerResponse:
+                loadingError = "The server sent an invalid response. Please try again later."
+                
+            default:
                 loadingError = "Network error: \(error.localizedDescription)"
             }
+            
+            print("❌ Failed to fetch episodes: \(error.localizedDescription) (code: \(nsError.code))")
         }
     }
 }
@@ -3609,30 +3851,43 @@ struct EpisodeRowView: View {
     }
     
     private var displayDuration: String {
-        // Check if episode has any saved progress (including current episode)
+        // Check if episode has any saved progress
         if let savedTime = audioVM.elapsedTimes[episode.audioURL],
-           savedTime > 0,
-           let durationStr = episode.duration {
+           savedTime > 0 {
             
-            // Parse the duration string to get total seconds  ← SIMPLIFIED
-            let parts = durationStr.split(separator: ":").map { Int($0) ?? 0 }
-            let totalSeconds: Int
-            switch parts.count {
-            case 3:
-                totalSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
-            case 2:
-                totalSeconds = parts[0] * 60 + parts[1]
-            case 1:
-                totalSeconds = parts[0]
-            default:
+            // Get the actual duration in seconds from the player if this is the current episode
+            let actualDurationSeconds: Double
+            if audioVM.episode?.id == episode.id && audioVM.durationTime > 0 {
+                // Use the precise duration from the audio player
+                actualDurationSeconds = audioVM.durationTime
+            } else if let durationStr = episode.duration {
+                // Parse duration string to get total seconds
+                let parts = durationStr.split(separator: ":").map { Int($0) ?? 0 }
+                let totalSeconds: Int
+                switch parts.count {
+                case 3:
+                    totalSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+                case 2:
+                    totalSeconds = parts[0] * 60 + parts[1]
+                case 1:
+                    totalSeconds = parts[0]
+                default:
+                    // Can't parse duration, show original
+                    return episode.durationInMinutes ?? ""
+                }
+                actualDurationSeconds = Double(totalSeconds)
+            } else {
+                // No duration available, show original
                 return episode.durationInMinutes ?? ""
             }
             
-            // Always use savedTime - it's the same variable used for playback resumption  ← SIMPLIFIED
-            let remainingSeconds = Double(totalSeconds) - savedTime
-            let roundedMinutes = Int(round(remainingSeconds / 60.0))
-            let hours = roundedMinutes / 60
-            let minutes = roundedMinutes % 60
+            // Calculate remaining time
+            let remainingSeconds = actualDurationSeconds - savedTime
+            
+            // Convert to minutes, rounding UP (ceiling) to match user expectations
+            let remainingMinutes = Int(ceil(remainingSeconds / 60.0))
+            let hours = remainingMinutes / 60
+            let minutes = remainingMinutes % 60
             
             if hours > 0 {
                 if minutes == 0 {
@@ -3713,10 +3968,20 @@ struct EpisodeRowView: View {
                                 .foregroundColor(.orange)
                         }
                         
-                        if downloadManager.isDownloaded(episode.id) {
+                        if downloadManager.isDownloading(episode.id) {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                                .frame(width: 12, height: 12)
+                        } else if downloadManager.isDownloaded(episode.id) {
                             Image(systemName: "arrow.down.circle.fill")
                                 .font(.caption2)
                                 .foregroundColor(.blue)
+                        }
+                        
+                        if audioVM.episodeQueue.contains(where: { $0.id == episode.id }) {
+                            Image(systemName: "text.badge.plus")
+                                .font(.caption2)
+                                .foregroundColor(.purple)
                         }
                     }
                     
@@ -3737,7 +4002,7 @@ struct EpisodeRowView: View {
                                 Text(displayDuration)
                                     .font(.caption)
                                     .foregroundColor(.gray)
-                                    .id(isCurrentEpisode ? audioVM.elapsedTimes[episode.audioURL] : 0)
+                                    .id(isCurrentEpisode ? audioVM.currentTime : 0)
                             }
                     }
                     .lineLimit(1)
@@ -4024,9 +4289,12 @@ struct EpisodeDescriptionView: View {
         if let nsAttrStr = try? NSAttributedString(data: data, options: options, documentAttributes: nil),
            var swiftUIAttrStr = try? AttributedString(nsAttrStr, including: \.uiKit) {
             
-            // Apply color and base font while preserving existing traits (bold, italic)
+            // Apply color and base font while preserving existing traits (bold, italic, links)
             for run in swiftUIAttrStr.runs {
                 let existingTraits = swiftUIAttrStr[run.range].uiKit.font?.fontDescriptor.symbolicTraits ?? []
+                
+                // Check if this run has a link
+                let hasLink = swiftUIAttrStr[run.range].link != nil
                 
                 var font: UIFont
                 if existingTraits.contains(.traitBold) && existingTraits.contains(.traitItalic) {
@@ -4040,7 +4308,15 @@ struct EpisodeDescriptionView: View {
                 }
                 
                 swiftUIAttrStr[run.range].font = Font(font)
-                swiftUIAttrStr[run.range].foregroundColor = colorScheme == .dark ? .white : .black
+                
+                // Apply appropriate color based on whether it's a link
+                if hasLink {
+                    swiftUIAttrStr[run.range].foregroundColor = .blue
+                    // Optional: add underline to links
+                    swiftUIAttrStr[run.range].underlineStyle = .single
+                } else {
+                    swiftUIAttrStr[run.range].foregroundColor = colorScheme == .dark ? .white : .black
+                }
             }
             
             return swiftUIAttrStr
@@ -4173,18 +4449,36 @@ struct MiniPlayerView: View {
     var body: some View {
         if audioVM.episode != nil {
             HStack {
-                if let imageURL = audioVM.episode?.imageURL ?? audioVM.podcastImageURL,
-                   let url = URL(string: imageURL) {
-                    CachedAsyncImage(url: url) { image in
-                        image.resizable()
-                    } placeholder: {
-                        Color.gray
+                ZStack(alignment: .bottomLeading) {
+                    if let imageURL = audioVM.episode?.imageURL ?? audioVM.podcastImageURL,
+                       let url = URL(string: imageURL) {
+                        CachedAsyncImage(url: url) { image in
+                            image.resizable()
+                        } placeholder: {
+                            Color.gray
+                        }
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 50, height: 50)
+                        .cornerRadius(8)
+                        .shadow(radius: 6)
                     }
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 50, height: 50)
-                    .cornerRadius(8)
-                    .shadow(radius: 6)
+                    
+                    // Progress bar overlay
+                    if audioVM.durationTime > 0 {
+                        GeometryReader { geometry in
+                            Rectangle()
+                                .fill(Color.blue)
+                                .frame(
+                                    width: geometry.size.width * CGFloat(audioVM.currentTime / audioVM.durationTime),
+                                    height: 3
+                                )
+                        }
+                        .frame(height: 3)
+                        .cornerRadius(1.5)
+                        .offset(y: -3)
+                    }
                 }
+                .frame(width: 50, height: 50)
                 
                 VStack(alignment: .leading, spacing: 2) {
                     if let episodeTitle = audioVM.episode?.title {
@@ -4393,7 +4687,6 @@ struct LibraryView: View {
                                 await libraryVM.refreshAllEpisodes()
                             }
                         }) {
-         //                   Image(systemName: "arrow.clockwise")
                             if libraryVM.isLoadingEpisodes {
                                 ProgressView()
                                     .scaleEffect(0.8)
@@ -4414,17 +4707,7 @@ struct LibraryView: View {
     
     private var subscriptionsView: some View {
         Group {
-            if libraryVM.isLoadingEpisodes {
-                VStack {
-                    ProgressView()
-                        .scaleEffect(1.2)
-                        .padding()
-                    Text("Loading new episodes...")
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if libraryVM.subscriptions.isEmpty {
+            if libraryVM.subscriptions.isEmpty {
                 VStack(spacing: 16) {
                     Image(systemName: "books.vertical")
                         .font(.system(size: 50))
@@ -4504,27 +4787,16 @@ struct LibraryView: View {
                     .padding()
                 }
                 .refreshable {
-                    Task {
-                        await libraryVM.refreshAllEpisodes()
-                    }
+                    await libraryVM.refreshAllEpisodes()
                 }
             }
         }
+        .animation(.easeInOut(duration: 0.3), value: libraryVM.isLoadingEpisodes)
     }
     
     private var newReleasesView: some View {
         Group {
-            if libraryVM.isLoadingEpisodes {
-                VStack {
-                    ProgressView()
-                        .scaleEffect(1.2)
-                        .padding()
-                    Text("Loading new episodes...")
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if libraryVM.subscriptions.isEmpty {
+            if libraryVM.subscriptions.isEmpty {
                 VStack(spacing: 16) {
                     Image(systemName: "star")
                         .font(.system(size: 50))
@@ -4597,19 +4869,11 @@ struct LibraryView: View {
                 }
                 .listStyle(.plain)
                 .refreshable {
-                    Task{
-                        await libraryVM.refreshAllEpisodes()
-                    }
-                }
-            }
-        }
-        .onAppear {
-            if libraryVM.allEpisodes.isEmpty && !libraryVM.subscriptions.isEmpty {
-                Task {
                     await libraryVM.refreshAllEpisodes()
                 }
             }
         }
+        .animation(.easeInOut(duration: 0.3), value: libraryVM.isLoadingEpisodes)
     }
 }
 
@@ -4799,8 +5063,11 @@ struct QueueView: View {
 // MARK: - StatisticsView
 struct StatisticsView: View {
     @ObservedObject private var statsManager = StatisticsManager.shared
+    @ObservedObject private var sessionManager = SessionManager.shared
     @State private var selectedPeriod: StatsPeriod = .allTime
     @State private var selectedTab: StatsTab = .overview
+    @State private var selectedSession: UserSession?
+    @State private var showClearConfirmation = false
     
     enum StatsTab: String, CaseIterable {
         case overview = "Overview"
@@ -4837,7 +5104,7 @@ struct StatisticsView: View {
                     PodcastStatsView()
                         .tag(StatsTab.podcasts)
                     
-                    SessionsStatsView()
+                    SessionsStatsView(selectedSession: $selectedSession)
                         .tag(StatsTab.sessions)
                 }
                 .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
@@ -4852,10 +5119,22 @@ struct StatisticsView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu("More") {
                         Button("Clear All Data", role: .destructive) {
-                            statsManager.clearAllStats()
+                   //         statsManager.clearAllStats()
+                            showClearConfirmation = true
                         }
                     }
                 }
+            }
+            .navigationDestination(item: $selectedSession) { session in
+                SessionDetailView(session: session)
+            }
+            .alert("Clear All Statistics?", isPresented: $showClearConfirmation) {
+                Button("Cancel", role: .cancel) { }
+                Button("Clear All", role: .destructive) {
+                    statsManager.clearAllStats()
+                }
+            } message: {
+                Text("This will permanently delete all your listening statistics, session history, and completion data. This action cannot be undone.")
             }
         }
     }
@@ -4875,7 +5154,6 @@ struct OverviewStatsView: View {
                         title: "Total Listening Time",
                         value: period == .allTime ? stats.totalListeningTimeFormatted :
                             StatisticsManager.formatLongDuration(statsManager.getListeningTimeForPeriod(period)),
-                        subtitle: period == .allTime ? "Since \(stats.firstListenDate?.formatted(date: .abbreviated, time: .omitted) ?? "Unknown")" : period.rawValue,
                         icon: "clock.fill",
                         color: .blue
                     )
@@ -4884,7 +5162,6 @@ struct OverviewStatsView: View {
                         StatsCardView(
                             title: "Episodes",
                             value: "\(stats.totalEpisodes)",
-                            subtitle: "Listened to",
                             icon: "play.circle.fill",
                             color: .green
                         )
@@ -4892,7 +5169,6 @@ struct OverviewStatsView: View {
                         StatsCardView(
                             title: "Podcasts",
                             value: "\(stats.totalPodcasts)",
-                            subtitle: "Different shows",
                             icon: "mic.fill",
                             color: .purple
                         )
@@ -4902,7 +5178,6 @@ struct OverviewStatsView: View {
                         StatsCardView(
                             title: "Avg Session",
                             value: stats.averageSessionLengthFormatted,
-                            subtitle: "Per session",
                             icon: "timer",
                             color: .orange
                         )
@@ -4910,7 +5185,6 @@ struct OverviewStatsView: View {
                         StatsCardView(
                             title: "Completion Rate",
                             value: "\(Int(stats.completionRate))%",
-                            subtitle: "Episodes finished",
                             icon: "checkmark.circle.fill",
                             color: .green
                         )
@@ -4928,6 +5202,12 @@ struct OverviewStatsView: View {
                             title: "Current Streak",
                             value: "\(stats.streakDays) days",
                             icon: "flame.fill"
+                        )
+                        
+                        StatsRowView(
+                            title: "Longest Streak",
+                            value: "\(stats.longestStreakDays) days",
+                            icon: "trophy.fill"
                         )
                         
                         StatsRowView(
@@ -4959,6 +5239,9 @@ struct OverviewStatsView: View {
                 }
             }
             .padding()
+        }
+        .onAppear {
+            statsManager.calculateStats()
         }
     }
     
@@ -5016,11 +5299,47 @@ struct PodcastStatsView: View {
 // MARK: - SessionsStatsView
 struct SessionsStatsView: View {
     @ObservedObject private var sessionManager = SessionManager.shared
-    @State private var selectedSession: UserSession?
+    @Binding var selectedSession: UserSession?
+    
+    var longestSessions: [UserSession] {
+        Array(sessionManager.userSessions
+            .sorted { $0.totalDuration > $1.totalDuration }
+            .prefix(3))
+    }
+    
+    var mostRecentSessions: [UserSession] {
+        Array(sessionManager.userSessions
+            .sorted { $0.endTime > $1.endTime }
+            .prefix(3))
+    }
+    
+    var mostEpisodesSession: [UserSession] {
+        Array(sessionManager.userSessions
+            .sorted { $0.episodes.count > $1.episodes.count }
+            .prefix(3))
+    }
+    
+    var todaysSessions: [UserSession] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        
+        return sessionManager.userSessions.filter { session in
+            calendar.isDate(session.startTime, inSameDayAs: today)
+        }.sorted { $0.endTime > $1.endTime }
+    }
+    
+    var thisWeeksSessions: [UserSession] {
+        let calendar = Calendar.current
+        let weekAgo = calendar.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+        
+        return sessionManager.userSessions.filter { session in
+            session.startTime >= weekAgo
+        }.sorted { $0.endTime > $1.endTime }
+    }
     
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 12) {
+            LazyVStack(spacing: 20) {
                 if sessionManager.userSessions.isEmpty {
                     VStack(spacing: 16) {
                         Image(systemName: "list.bullet")
@@ -5038,20 +5357,138 @@ struct SessionsStatsView: View {
                     }
                     .padding()
                 } else {
-                    ForEach(sessionManager.userSessions) { session in
-                        Button(action: {
-                            selectedSession = session
-                        }) {
-                            SessionCardView(session: session)
+                    // Today's Sessions
+                    if !todaysSessions.isEmpty {
+                        SessionCategoryView(
+                            title: "Today",
+                            sessions: todaysSessions,
+                            icon: "calendar.badge.clock",
+                            selectedSession: $selectedSession
+                        )
+                    }
+                    
+                    // This Week's Sessions
+                    if !thisWeeksSessions.isEmpty {
+                        SessionCategoryView(
+                            title: "This Week",
+                            sessions: thisWeeksSessions,
+                            icon: "calendar",
+                            selectedSession: $selectedSession
+                        )
+                    }
+                    
+                    // Longest Sessions
+                    if !longestSessions.isEmpty {
+                        SessionCategoryView(
+                            title: "Longest Sessions",
+                            sessions: longestSessions,
+                            icon: "crown.fill",
+                            selectedSession: $selectedSession
+                        )
+                    }
+                    
+                    // Most Episodes
+                    if !mostEpisodesSession.isEmpty {
+                        SessionCategoryView(
+                            title: "Most Episodes",
+                            sessions: mostEpisodesSession,
+                            icon: "list.number",
+                            selectedSession: $selectedSession
+                        )
+                    }
+                    
+                    // Most Recent Sessions
+                    if !mostRecentSessions.isEmpty {
+                        SessionCategoryView(
+                            title: "Recent Sessions",
+                            sessions: mostRecentSessions,
+                            icon: "clock.fill",
+                            selectedSession: $selectedSession
+                        )
+                    }
+                    
+                    // Total Stats Summary
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Summary")
+                            .font(.title3)
+                            .fontWeight(.bold)
+                            .padding(.horizontal)
+                        
+                        VStack(spacing: 8) {
+                            HStack {
+                                Text("Total Sessions")
+                                Spacer()
+                                Text("\(sessionManager.userSessions.count)")
+                                    .fontWeight(.semibold)
+                            }
+                            
+                            HStack {
+                                Text("Total Listening Time")
+                                Spacer()
+                                Text(DurationFormatter.formatLongDuration(
+                                    sessionManager.userSessions.reduce(0) { $0 + $1.totalDuration }
+                                ))
+                                .fontWeight(.semibold)
+                            }
+                            
+                            HStack {
+                                Text("Average Session")
+                                Spacer()
+                                let avgDuration = sessionManager.userSessions.isEmpty ? 0 :
+                                    sessionManager.userSessions.reduce(0) { $0 + $1.totalDuration } / Double(sessionManager.userSessions.count)
+                                Text(DurationFormatter.formatDuration(avgDuration))
+                                    .fontWeight(.semibold)
+                            }
                         }
-                        .buttonStyle(PlainButtonStyle())
+                        .font(.subheadline)
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
                     }
                 }
             }
             .padding()
         }
-        .navigationDestination(item: $selectedSession) { session in
-            SessionDetailView(session: session)
+    }
+}
+
+// MARK: - SessionCategoryView
+struct SessionCategoryView: View {
+    let title: String
+    let sessions: [UserSession]
+    let icon: String
+    @Binding var selectedSession: UserSession?
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: icon)
+                    .foregroundColor(.blue)
+                
+                Text(title)
+                    .font(.title3)
+                    .fontWeight(.bold)
+                
+                Spacer()
+                
+                Text("\(sessions.count)")
+                    .font(.caption)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.blue)
+                    .cornerRadius(8)
+            }
+            .padding(.horizontal)
+            
+            ForEach(sessions) { session in
+                Button(action: {
+                    selectedSession = session
+                }) {
+                    SessionCardView(session: session)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
         }
     }
 }
@@ -5353,7 +5790,6 @@ struct SessionEpisodeRowView: View {
 struct StatsCardView: View {
     let title: String
     let value: String
-    let subtitle: String
     let icon: String
     let color: Color
     
@@ -5372,9 +5808,6 @@ struct StatsCardView: View {
                 .foregroundColor(.gray)
                 .multilineTextAlignment(.center)
             
-            Text(subtitle)
-                .font(.caption2)
-                .foregroundColor(.gray)
         }
         .frame(maxWidth: .infinity)
         .padding()
