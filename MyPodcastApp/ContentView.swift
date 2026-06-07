@@ -2965,7 +2965,7 @@ struct HomeView: View {
                             
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 12) {
-                                    ForEach(libraryVM.subscriptions.prefix(5)) { podcast in
+                                    ForEach(libraryVM.subscriptions.reversed().prefix(5)) { podcast in
                                         NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
                                             VStack {
                                                 CachedAsyncImage(url: URL(string: podcast.artworkUrl600)) { image in
