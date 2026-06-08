@@ -653,7 +653,6 @@ struct PodcastStats: Identifiable, Codable {
     let totalListeningTime: TimeInterval
     let episodeCount: Int
     let averageListeningTime: TimeInterval
-    let completionRate: Double // percentage of episodes completed
     let firstListenDate: Date
     let lastListenDate: Date
     
@@ -661,9 +660,9 @@ struct PodcastStats: Identifiable, Codable {
         return DurationFormatter.formatDuration(totalListeningTime)
     }
     
-    var averageListeningTimeFormatted: String {
+  /*  var averageListeningTimeFormatted: String {
         return StatisticsManager.formatDuration(averageListeningTime)
-    }
+    } */
 }
 
 //MARK: - OverallStats
@@ -671,9 +670,7 @@ struct OverallStats: Codable {
     let totalListeningTime: TimeInterval
     let totalEpisodes: Int
     let totalPodcasts: Int
-    let averageSessionLength: TimeInterval
     let longestSession: TimeInterval
-    let completionRate: Double
     let firstListenDate: Date?
     let streakDays: Int
     let longestStreakDays: Int
@@ -681,10 +678,6 @@ struct OverallStats: Codable {
     
     var totalListeningTimeFormatted: String {
         return DurationFormatter.formatDuration(totalListeningTime)
-    }
-    
-    var averageSessionLengthFormatted: String {
-        return StatisticsManager.formatDuration(averageSessionLength)
     }
     
     var longestSessionFormatted: String {
@@ -699,8 +692,8 @@ class StatisticsManager: ObservableObject {
     @Published var overallStats: OverallStats?
     @Published var podcastStats: [PodcastStats] = []
     @Published var recentSessions: [ListeningSession] = []
-    private var completedEpisodes: Set<String> = [] // Store episode IDs that were completed
-    private let completedEpisodesKey = "completedEpisodes"
+ //   private var completedEpisodes: Set<String> = [] // Store episode IDs that were completed
+ //   private let completedEpisodesKey = "completedEpisodes"
     private var listeningSessions: [ListeningSession] = []
     private var currentSessionStart: Date?
     private var currentEpisode: Episode?
@@ -710,10 +703,10 @@ class StatisticsManager: ObservableObject {
     
     private init() {
         loadData()
-        loadCompletedEpisodes()
+    //    loadCompletedEpisodes()
         calculateStats()
     }
-    
+    /*
     private func loadCompletedEpisodes() {
         if let data = UserDefaults.standard.data(forKey: completedEpisodesKey),
            let decoded = try? JSONDecoder().decode(Set<String>.self, from: data) {
@@ -737,7 +730,7 @@ class StatisticsManager: ObservableObject {
     // Check if episode was ever completed
     func isEpisodeCompleted(_ episodeID: String) -> Bool {
         return completedEpisodes.contains(episodeID)
-    }
+    } */
     
     func startListeningSession(for episode: Episode) {
         // Don't start a new session if we already have one for the same episode
@@ -813,13 +806,12 @@ class StatisticsManager: ObservableObject {
         let uniqueEpisodes = Set(listeningSessions.map { $0.episodeID }).count
         let uniquePodcasts = Set(listeningSessions.map { $0.podcastName }).count
         
-        let averageSession = totalTime / Double(listeningSessions.count)
         let longestSession = listeningSessions.max { $0.duration < $1.duration }?.duration ?? 0
         
-        let uniqueEpisodeIDs = Set(listeningSessions.map { $0.episodeID })
-        let completedCount = uniqueEpisodeIDs.filter { completedEpisodes.contains($0) }.count
-        let completionRate = uniqueEpisodes > 0 ?
-        Double(completedCount) / Double(uniqueEpisodes) * 100 : 0
+ //       let uniqueEpisodeIDs = Set(listeningSessions.map { $0.episodeID })
+  //      let completedCount = uniqueEpisodeIDs.filter { completedEpisodes.contains($0) }.count
+  //      let completionRate = uniqueEpisodes > 0 ?
+  //      Double(completedCount) / Double(uniqueEpisodes) * 100 : 0
         
         let firstListen = listeningSessions.min { $0.startTime < $1.startTime }?.startTime
         
@@ -831,9 +823,7 @@ class StatisticsManager: ObservableObject {
             totalListeningTime: totalTime,
             totalEpisodes: uniqueEpisodes,
             totalPodcasts: uniquePodcasts,
-            averageSessionLength: averageSession,
             longestSession: longestSession,
-            completionRate: completionRate,
             firstListenDate: firstListen,
             streakDays: streak,
             longestStreakDays: longestStreak,
@@ -846,13 +836,13 @@ class StatisticsManager: ObservableObject {
         
         podcastStats = podcastGroups.map { (podcastName, sessions) in
             let totalTime = sessions.reduce(0) { $0 + $1.duration }
-            let uniqueEpisodeIDs = Set(sessions.map { $0.episodeID })
+     //       let uniqueEpisodeIDs = Set(sessions.map { $0.episodeID })
             let episodeCount = Set(sessions.map { $0.episodeID }).count
             let averageTime = totalTime / Double(sessions.count)
             
-            let completedCount = uniqueEpisodeIDs.filter { completedEpisodes.contains($0) }.count
+      /*      let completedCount = uniqueEpisodeIDs.filter { completedEpisodes.contains($0) }.count
             let completionRate = episodeCount > 0 ?
-            Double(completedCount) / Double(episodeCount) * 100 : 0
+            Double(completedCount) / Double(episodeCount) * 100 : 0 */
             
             let firstListen = sessions.min { $0.startTime < $1.startTime }?.startTime ?? Date()
             let lastListen = sessions.max { $0.startTime < $1.startTime }?.startTime ?? Date()
@@ -862,7 +852,7 @@ class StatisticsManager: ObservableObject {
                 totalListeningTime: totalTime,
                 episodeCount: episodeCount,
                 averageListeningTime: averageTime,
-                completionRate: completionRate,
+      //          completionRate: completionRate,
                 firstListenDate: firstListen,
                 lastListenDate: lastListen
             )
@@ -1031,9 +1021,9 @@ class StatisticsManager: ObservableObject {
     @MainActor
     func clearAllStats() {
         listeningSessions.removeAll()
-        completedEpisodes.removeAll()
+  //      completedEpisodes.removeAll()
         saveData()
-        saveCompletedEpisodes()
+  //      saveCompletedEpisodes()
         calculateStats()
   //      SessionManager.shared.clearAllSessions()
     }
@@ -1999,7 +1989,7 @@ class AudioPlayerViewModel: ObservableObject {
                         // Mark as played and handle cleanup before moving to next
                         if let episodeID = self.episode?.id {
                             EpisodeTrackingManager.shared.markAsPlayed(episodeID)
-                            StatisticsManager.shared.markEpisodeCompleted(episodeID)
+                    //        StatisticsManager.shared.markEpisodeCompleted(episodeID)
                             
                             if let episode = self.episode {
                                 self.episodeCompleted[episode.audioURL] = true
@@ -2115,7 +2105,7 @@ class AudioPlayerViewModel: ObservableObject {
             
             if let episodeID = self.episode?.id {
                 EpisodeTrackingManager.shared.markAsPlayed(episodeID)
-                StatisticsManager.shared.markEpisodeCompleted(episodeID)
+         //       StatisticsManager.shared.markEpisodeCompleted(episodeID)
                 
                 if let episode = self.episode {
                     self.episodeCompleted[episode.audioURL] = true
@@ -4151,10 +4141,22 @@ struct EpisodeRowView: View {
                                 .foregroundColor(.orange)
                         }
                         
-                        if downloadManager.isDownloading(episode.id) {
+                /*        if downloadManager.isDownloading(episode.id) {
                             ProgressView()
                                 .scaleEffect(0.6)
-                                .frame(width: 12, height: 12)
+                                .frame(width: 12, height: 12) */
+                        if downloadManager.isDownloading(episode.id) {
+                            let progress = downloadManager.downloadProgress[episode.id] ?? 0.0
+                            ZStack {
+                                Circle()
+                                    .stroke(Color.gray.opacity(0.3), lineWidth: 2)
+                                Circle()
+                                    .trim(from: 0, to: progress)
+                                    .stroke(Color.blue, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                    .rotationEffect(.degrees(-90))
+                                    .animation(.linear(duration: 0.2), value: progress)
+                            }
+                            .frame(width: 14, height: 14)
                         } else if downloadManager.isDownloaded(episode.id) {
                             Image(systemName: "arrow.down.circle.fill")
                                 .font(.caption2)
@@ -5375,22 +5377,6 @@ struct OverviewStatsView: View {
                         )
                     }
                     
-                    HStack(spacing: 16) {
-                        StatsCardView(
-                            title: "Avg Session",
-                            value: stats.averageSessionLengthFormatted,
-                            icon: "timer",
-                            color: .orange
-                        )
-                        
-                        StatsCardView(
-                            title: "Completion Rate",
-                            value: "\(Int(stats.completionRate))%",
-                            icon: "checkmark.circle.fill",
-                            color: .green
-                        )
-                    }
-                    
                     // Additional Stats
                     VStack(spacing: 12) {
                         StatsRowView(
@@ -6094,7 +6080,7 @@ struct PodcastStatsCardView: View {
                     .fontWeight(.bold)
                     .foregroundColor(.blue)
             }
-            
+            /*
             HStack {
                 Label(podcastStat.averageListeningTimeFormatted, systemImage: "clock")
                     .font(.caption)
@@ -6105,7 +6091,7 @@ struct PodcastStatsCardView: View {
                 Label("\(Int(podcastStat.completionRate))%", systemImage: "checkmark.circle")
                     .font(.caption)
                     .foregroundColor(.gray)
-            }
+            } */
         }
         .padding()
         .background(Color(.systemGray6))
