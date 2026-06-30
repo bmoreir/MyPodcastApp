@@ -642,8 +642,9 @@ struct ListeningSession: Codable {
     let episodeTitle: String
     let startTime: Date
     let endTime: Date
-    let duration: TimeInterval // in seconds
+    let duration: TimeInterval
     let completed: Bool
+    let localHour: Int?
 }
 
 //MARK: - PodcastStats
@@ -652,17 +653,12 @@ struct PodcastStats: Identifiable, Codable {
     let podcastName: String
     let totalListeningTime: TimeInterval
     let episodeCount: Int
-    let averageListeningTime: TimeInterval
     let firstListenDate: Date
     let lastListenDate: Date
     
     var totalListeningTimeFormatted: String {
         return DurationFormatter.formatDuration(totalListeningTime)
     }
-    
-  /*  var averageListeningTimeFormatted: String {
-        return StatisticsManager.formatDuration(averageListeningTime)
-    } */
 }
 
 //MARK: - OverallStats
@@ -692,47 +688,22 @@ class StatisticsManager: ObservableObject {
     @Published var overallStats: OverallStats?
     @Published var podcastStats: [PodcastStats] = []
     @Published var recentSessions: [ListeningSession] = []
- //   private var completedEpisodes: Set<String> = [] // Store episode IDs that were completed
- //   private let completedEpisodesKey = "completedEpisodes"
     private var listeningSessions: [ListeningSession] = []
     private var currentSessionStart: Date?
     private var currentEpisode: Episode?
-    
+    private var pauseTimer: Timer?
     private let sessionsKey = "listeningSessions"
     private let minSessionDuration: TimeInterval = 30 // Minimum 30 seconds to count as a session
+    private let pauseGracePeriod: TimeInterval = 30 // 30 seconds as pause threshold for a session
     
     private init() {
         loadData()
-    //    loadCompletedEpisodes()
-        calculateStats()
-    }
-    /*
-    private func loadCompletedEpisodes() {
-        if let data = UserDefaults.standard.data(forKey: completedEpisodesKey),
-           let decoded = try? JSONDecoder().decode(Set<String>.self, from: data) {
-            completedEpisodes = decoded
-        }
-    }
-
-    private func saveCompletedEpisodes() {
-        if let data = try? JSONEncoder().encode(completedEpisodes) {
-            UserDefaults.standard.set(data, forKey: completedEpisodesKey)
-        }
-    }
-
-    // Add method to mark episode as completed
-    func markEpisodeCompleted(_ episodeID: String) {
-        completedEpisodes.insert(episodeID)
-        saveCompletedEpisodes()
         calculateStats()
     }
 
-    // Check if episode was ever completed
-    func isEpisodeCompleted(_ episodeID: String) -> Bool {
-        return completedEpisodes.contains(episodeID)
-    } */
-    
     func startListeningSession(for episode: Episode) {
+        pauseTimer?.invalidate()
+        pauseTimer = nil
         // Don't start a new session if we already have one for the same episode
         if let currentEpisode = currentEpisode,
            currentEpisode.id == episode.id,
@@ -742,7 +713,8 @@ class StatisticsManager: ObservableObject {
         
         // End previous session if one exists for a different episode
         if currentSessionStart != nil {
-            endListeningSession(completed: false)
+            currentEpisode = episode
+            return
         }
         
         currentSessionStart = Date()
@@ -750,6 +722,9 @@ class StatisticsManager: ObservableObject {
     }
     
     func endListeningSession(completed: Bool = false) {
+        pauseTimer?.invalidate()
+        pauseTimer = nil
+        
         guard let startTime = currentSessionStart,
               let episode = currentEpisode else {
             return
@@ -757,7 +732,7 @@ class StatisticsManager: ObservableObject {
         
         let endTime = Date()
         let duration = endTime.timeIntervalSince(startTime)
-        
+        let localHour = Calendar.current.component(.hour, from: startTime)
         
         let minDuration: TimeInterval = 30
         
@@ -769,7 +744,8 @@ class StatisticsManager: ObservableObject {
                 startTime: startTime,
                 endTime: endTime,
                 duration: duration,
-                completed: completed
+                completed: completed,
+                localHour: localHour
             )
             
             listeningSessions.append(session)
@@ -782,9 +758,12 @@ class StatisticsManager: ObservableObject {
     }
     
     func pauseSession() {
-        
-        // When pausing, we end current session and will start new one on resume
-        endListeningSession()
+        pauseTimer?.invalidate()
+        pauseTimer = Timer.scheduledTimer(withTimeInterval: pauseGracePeriod, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.endListeningSession()
+            }
+        }
     }
     
     func calculateStats() {
@@ -798,23 +777,14 @@ class StatisticsManager: ObservableObject {
         calculateOverallStats()
         calculatePodcastStats()
         updateRecentSessions()
-        
     }
     
     private func calculateOverallStats() {
         let totalTime = listeningSessions.reduce(0) { $0 + $1.duration }
         let uniqueEpisodes = Set(listeningSessions.map { $0.episodeID }).count
         let uniquePodcasts = Set(listeningSessions.map { $0.podcastName }).count
-        
-        let longestSession = listeningSessions.max { $0.duration < $1.duration }?.duration ?? 0
-        
- //       let uniqueEpisodeIDs = Set(listeningSessions.map { $0.episodeID })
-  //      let completedCount = uniqueEpisodeIDs.filter { completedEpisodes.contains($0) }.count
-  //      let completionRate = uniqueEpisodes > 0 ?
-  //      Double(completedCount) / Double(uniqueEpisodes) * 100 : 0
-        
+        let longestSession = calculateLongestSession()
         let firstListen = listeningSessions.min { $0.startTime < $1.startTime }?.startTime
-        
         let streak = calculateStreak()
         let longestStreak = calculateLongestStreak()
         let favoriteHour = calculateFavoriteListeningHour()
@@ -831,19 +801,35 @@ class StatisticsManager: ObservableObject {
         )
     }
     
+    private func calculateLongestSession() -> TimeInterval {
+        guard !listeningSessions.isEmpty else { return 0 }
+        
+        let sorted = listeningSessions.sorted { $0.startTime < $1.startTime }
+        let threshold: TimeInterval = 5
+        
+        var longestBlock: TimeInterval = 0
+        var currentBlockDuration: TimeInterval = sorted[0].duration
+        
+        for i in 1..<sorted.count {
+            let gap = sorted[i].startTime.timeIntervalSince(sorted[i-1].endTime)
+            if gap <= threshold {
+                currentBlockDuration += sorted[i].duration
+            } else {
+                longestBlock = max(longestBlock, currentBlockDuration)
+                currentBlockDuration = sorted[i].duration
+            }
+        }
+        
+        longestBlock = max(longestBlock, currentBlockDuration)
+        return longestBlock
+    }
+    
     private func calculatePodcastStats() {
         let podcastGroups = Dictionary(grouping: listeningSessions, by: { $0.podcastName })
         
         podcastStats = podcastGroups.map { (podcastName, sessions) in
             let totalTime = sessions.reduce(0) { $0 + $1.duration }
-     //       let uniqueEpisodeIDs = Set(sessions.map { $0.episodeID })
             let episodeCount = Set(sessions.map { $0.episodeID }).count
-            let averageTime = totalTime / Double(sessions.count)
-            
-      /*      let completedCount = uniqueEpisodeIDs.filter { completedEpisodes.contains($0) }.count
-            let completionRate = episodeCount > 0 ?
-            Double(completedCount) / Double(episodeCount) * 100 : 0 */
-            
             let firstListen = sessions.min { $0.startTime < $1.startTime }?.startTime ?? Date()
             let lastListen = sessions.max { $0.startTime < $1.startTime }?.startTime ?? Date()
             
@@ -851,8 +837,6 @@ class StatisticsManager: ObservableObject {
                 podcastName: podcastName,
                 totalListeningTime: totalTime,
                 episodeCount: episodeCount,
-                averageListeningTime: averageTime,
-      //          completionRate: completionRate,
                 firstListenDate: firstListen,
                 lastListenDate: lastListen
             )
@@ -948,12 +932,11 @@ class StatisticsManager: ObservableObject {
         
         return longestStreak
     }
-    
+
     private func calculateFavoriteListeningHour() -> Int {
         let hourGroups = Dictionary(grouping: listeningSessions) { session in
-            Calendar.current.component(.hour, from: session.startTime)
+            session.localHour
         }
-        
         return hourGroups.max { $0.value.count < $1.value.count }?.key ?? 12
     }
     
@@ -1021,213 +1004,10 @@ class StatisticsManager: ObservableObject {
     @MainActor
     func clearAllStats() {
         listeningSessions.removeAll()
-  //      completedEpisodes.removeAll()
         saveData()
-  //      saveCompletedEpisodes()
         calculateStats()
-  //      SessionManager.shared.clearAllSessions()
     }
 }
-/*
-// MARK: - SessionManager
-@MainActor
-class SessionManager: ObservableObject {
-    static let shared = SessionManager()
-    
-    @Published var userSessions: [UserSession] = []
-    @Published var currentSession: UserSession?
-    
-    var currentEpisodeSession: EpisodeSession?
-    private var episodeStartTime: Date?
-    private var pauseTimer: Timer?
-    private let pauseThreshold: TimeInterval = 300 // 5 minutes
-    
-    private let sessionsKey = "userSessions"
-    private let sessionNumberKey = "sessionNumber"
-    
-    private init() {
-        loadSessions()
-    }
-    
-    // MARK: - Session Management
-    
-    func startSession() {
-        guard currentSession == nil else {
-            print("Session already active")
-            return
-        }
-        
-        let sessionNumber = getNextSessionNumber()
-        currentSession = UserSession(
-            sessionNumber: sessionNumber,
-            startTime: Date(),
-            endTime: Date(),
-            totalDuration: 0,
-            episodes: []
-        )
-        print("Started session #\(sessionNumber)")
-    }
-    
-    func startEpisodeInSession(episode: Episode) {
-        // Start session if not already active
-        if currentSession == nil {
-            startSession()
-        }
-        
-        // Cancel any pending pause timer
-        pauseTimer?.invalidate()
-        pauseTimer = nil
-        
-        // End previous episode session if exists
-        if currentEpisodeSession != nil {
-            endCurrentEpisodeSession(completed: false)
-        }
-        
-        // Start new episode session
-        episodeStartTime = Date()
-        currentEpisodeSession = EpisodeSession(
-            episodeID: episode.id,
-            episodeTitle: episode.title,
-            podcastName: episode.podcastName ?? "Unknown Podcast",
-            imageURL: episode.imageURL ?? episode.podcastImageURL,
-            duration: 0,
-            startTime: Date(),
-            endTime: Date(),
-            completed: false
-        )
-        
-        print("Started episode session: \(episode.title)")
-    }
-    
-    func pauseEpisodeInSession() {
-        guard let startTime = episodeStartTime else { return }
-        pauseTimer?.invalidate()
-        pauseTimer = nil
-
-        // Update episode duration
-        if var episodeSession = currentEpisodeSession {
-            let duration = Date().timeIntervalSince(startTime)
-            episodeSession.duration = duration
-            episodeSession.endTime = Date()
-            currentEpisodeSession = episodeSession
-        }
-        
-        // Start pause timer - if not resumed within threshold, end session
-        pauseTimer = Timer.scheduledTimer(withTimeInterval: pauseThreshold, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                print("Pause threshold exceeded - ending session")
-                self?.endSession()
-            }
-        }
-        
-        print("Episode paused - will end session if not resumed in \(pauseThreshold)s")
-    }
-    
-    func resumeEpisodeInSession() {
-        // Cancel pause timer
-        pauseTimer?.invalidate()
-        pauseTimer = nil
-        
-        if currentSession == nil {
-            startSession()
-        }
-        
-        // Resume episode timing
-        episodeStartTime = Date()
-        print("Episode resumed - pause timer cancelled")
-    }
-    
-    func endCurrentEpisodeSession(completed: Bool) {
-        guard var episodeSession = currentEpisodeSession,
-              let startTime = episodeStartTime else { return }
-        
-        // Calculate final duration
-        let additionalDuration = Date().timeIntervalSince(startTime)
-        episodeSession.duration += additionalDuration
-        episodeSession.endTime = Date()
-        episodeSession = EpisodeSession(
-            id: episodeSession.id,
-            episodeID: episodeSession.episodeID,
-            episodeTitle: episodeSession.episodeTitle,
-            podcastName: episodeSession.podcastName,
-            imageURL: episodeSession.imageURL,
-            duration: episodeSession.duration,
-            startTime: episodeSession.startTime,
-            endTime: Date(),
-            completed: completed
-        )
-        
-        // Add to current session
-        if var session = currentSession {
-            session.episodes.append(episodeSession)
-            session.totalDuration += episodeSession.duration
-            session.endTime = Date()
-            currentSession = session
-            print("Ended episode session: \(episodeSession.episodeTitle) - \(episodeSession.duration)s")
-        }
-        
-        currentEpisodeSession = nil
-        episodeStartTime = nil
-    }
-    
-    func endSession() {
-        // Cancel pause timer
-        pauseTimer?.invalidate()
-        pauseTimer = nil
-        
-        // End current episode if active
-        if currentEpisodeSession != nil {
-            endCurrentEpisodeSession(completed: false)
-        }
-        
-        // Save session
-        if let session = currentSession, !session.episodes.isEmpty {
-            userSessions.insert(session, at: 0) // Add to beginning for reverse chronological
-            saveSessions()
-            print("Ended session #\(session.sessionNumber) - Total: \(session.totalDuration)s, Episodes: \(session.episodes.count)")
-        }
-        
-        currentSession = nil
-    }
-    
-    func clearAllSessions() {
-        // End current session if active
-        if currentSession != nil {
-            endSession()
-        }
-        
-        // Clear all saved sessions
-        userSessions.removeAll()
-        saveSessions()
-        
-        // Reset session counter
-        UserDefaults.standard.set(0, forKey: sessionNumberKey)
-        
-        print("✅ Cleared all session data")
-    }
-    
-    // MARK: - Persistence
-    
-    private func saveSessions() {
-        if let data = try? JSONEncoder().encode(userSessions) {
-            UserDefaults.standard.set(data, forKey: sessionsKey)
-        }
-    }
-    
-    private func loadSessions() {
-        if let data = UserDefaults.standard.data(forKey: sessionsKey),
-           let decoded = try? JSONDecoder().decode([UserSession].self, from: data) {
-            userSessions = decoded
-        }
-    }
-    
-    private func getNextSessionNumber() -> Int {
-        let current = UserDefaults.standard.integer(forKey: sessionNumberKey)
-        let next = current + 1
-        UserDefaults.standard.set(next, forKey: sessionNumberKey)
-        return next
-    }
-} */
 
 enum StatsPeriod: String, CaseIterable {
     case today = "Today"
@@ -1236,44 +1016,6 @@ enum StatsPeriod: String, CaseIterable {
     case thisYear = "This Year"
     case allTime = "All Time"
 }
-/*
-struct UserSession: Identifiable, Codable, Hashable {
-    var id = UUID()
-    let sessionNumber: Int
-    let startTime: Date
-    var endTime: Date
-    var totalDuration: TimeInterval
-    var episodes: [EpisodeSession]
-}
-
-struct EpisodeSession: Identifiable, Codable, Hashable {
-    var id = UUID()
-    let episodeID: String
-    let episodeTitle: String
-    let podcastName: String
-    let imageURL: String?
-    var duration: TimeInterval
-    let startTime: Date
-    var endTime: Date
-    let completed: Bool
-}
-
-//MARK: - TaskMapper (Thread-safe mapping)
-actor TaskMapper {
-    private var mapping: [ObjectIdentifier: String] = [:]
-    
-    func setEpisodeID(_ episodeID: String, for task: URLSessionDownloadTask) {
-        mapping[ObjectIdentifier(task)] = episodeID
-    }
-    
-    func getEpisodeID(for task: URLSessionDownloadTask) -> String? {
-        return mapping[ObjectIdentifier(task)]
-    }
-    
-    func removeEpisodeID(for task: URLSessionDownloadTask) {
-        mapping.removeValue(forKey: ObjectIdentifier(task))
-    }
-} */
 
 //MARK: - DownloadManager
 @MainActor
@@ -1289,7 +1031,6 @@ class DownloadManager: NSObject, ObservableObject {
     private let autoDeleteKey = "autoDeleteOnCompletion"
     private var downloadTasks: [String: URLSessionDownloadTask] = [:]
     
-    // CHANGE: Make these nonisolated with their own synchronization
     nonisolated(unsafe) private var taskToEpisodeMapping: [ObjectIdentifier: String] = [:]
     private let mappingQueue = DispatchQueue(label: "com.mypodcastapp.downloadmapping")
     
@@ -1538,12 +1279,6 @@ class EpisodeTrackingManager: ObservableObject {
     
     // MARK: - Status Management
     func markAsPlayed(_ episodeID: String) {
-        // If this episode is currently playing, stop playback
-        let audioVM = AudioPlayerViewModel.shared
-        if audioVM.episode?.id == episodeID {
-            audioVM.cleanup() // This stops playback and clears the player
-        }
-        
         var status = episodeStatuses[episodeID] ?? EpisodeStatus()
         status.isPlayed = true
         status.isArchived = true // Marking played also archives
@@ -1784,12 +1519,6 @@ class AudioPlayerViewModel: ObservableObject {
     func load(episode: Episode, podcastImageURL: String? = nil) {
         cleanupCurrentEpisodeObservers()
         
-        /*
-        if self.episode?.audioURL == episode.audioURL &&
-            player != nil &&
-            SessionManager.shared.currentEpisodeSession?.episodeID == episode.id {
-            return
-        } */
         if self.episode?.audioURL == episode.audioURL && player != nil { return }
         
         self.episode = episode
@@ -1861,7 +1590,6 @@ class AudioPlayerViewModel: ObservableObject {
         
         addPeriodicTimeObserver()
         
-        // REPLACE the savedTime restoration with this:
         let settings = PodcastSortPreferences.shared.getSettings(for: episode.podcastName ?? "")
         
         // Check if episode was completed
@@ -1886,7 +1614,6 @@ class AudioPlayerViewModel: ObservableObject {
         
         updateNowPlayingInfo()
         StatisticsManager.shared.startListeningSession(for: episode)
-  //      SessionManager.shared.startEpisodeInSession(episode: episode)
     }
     
     private func saveCompletedStatus() {
@@ -1970,8 +1697,8 @@ class AudioPlayerViewModel: ObservableObject {
             }
         
         let interval = CMTime(seconds: 1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            DispatchQueue.main.async {
+        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: nil) { [weak self] time in
+            Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 self.currentTime = time.seconds
                 self.savePlaybackProgress()
@@ -1989,7 +1716,6 @@ class AudioPlayerViewModel: ObservableObject {
                         // Mark as played and handle cleanup before moving to next
                         if let episodeID = self.episode?.id {
                             EpisodeTrackingManager.shared.markAsPlayed(episodeID)
-                    //        StatisticsManager.shared.markEpisodeCompleted(episodeID)
                             
                             if let episode = self.episode {
                                 self.episodeCompleted[episode.audioURL] = true
@@ -2003,7 +1729,6 @@ class AudioPlayerViewModel: ObservableObject {
                         }
                         
                         StatisticsManager.shared.endListeningSession(completed: true)
-      //                  SessionManager.shared.endCurrentEpisodeSession(completed: true)
                         // Skip to end to trigger next episode
                         self.playerDidFinishPlaying()
                     }
@@ -2020,11 +1745,9 @@ class AudioPlayerViewModel: ObservableObject {
             isPlaying = false
             savePlaybackProgress()
             StatisticsManager.shared.pauseSession()
-      //      SessionManager.shared.pauseEpisodeInSession()
         } else {
             player.rate = playbackSpeed // Use the current speed setting
             isPlaying = true
-       //     SessionManager.shared.resumeEpisodeInSession()
             
             if let episode = episode {
                 StatisticsManager.shared.startListeningSession(for: episode)
@@ -2105,7 +1828,6 @@ class AudioPlayerViewModel: ObservableObject {
             
             if let episodeID = self.episode?.id {
                 EpisodeTrackingManager.shared.markAsPlayed(episodeID)
-         //       StatisticsManager.shared.markEpisodeCompleted(episodeID)
                 
                 if let episode = self.episode {
                     self.episodeCompleted[episode.audioURL] = true
@@ -2118,9 +1840,7 @@ class AudioPlayerViewModel: ObservableObject {
                 }
             }
             
-            
             StatisticsManager.shared.endListeningSession(completed: true)
-     //       SessionManager.shared.endCurrentEpisodeSession(completed: true)
             
             self.isPlaying = false
             self.currentTime = 0
@@ -2132,9 +1852,6 @@ class AudioPlayerViewModel: ObservableObject {
                 self.play()
             } else {
                 self.clearNowPlayingInfo()
-                
-       //         SessionManager.shared.endSession()
-                
                 self.cleanupCurrentEpisodeObservers()
                 self.episode = nil
                 self.podcastImageURL = nil
@@ -2282,20 +1999,6 @@ class AudioPlayerViewModel: ObservableObject {
                     self.updateNowPlayingInfo()
                 }
             }
-            /*
-            // Interruption ended
-            guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else {
-                return
-            }
-            
-            let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-            if options.contains(.shouldResume) {
-                // Resume playback if the system suggests we should
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                    self?.player?.play()
-                    self?.isPlaying = true
-                }
-            } */
             
         @unknown default:
             break
@@ -3314,17 +3017,6 @@ struct PodcastDetailView: View {
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @ObservedObject private var downloadManager = DownloadManager.shared
     
- /*   var filteredEpisodes: [Episode] {
-        episodes.filter { episode in
-            if hideArchived && trackingManager.isArchived(episode.id) {
-                return false
-            }
-            if trackingManager.hidePlayedEpisodes && trackingManager.isPlayed(episode.id) {
-                return false
-            }
-            return true
-        }
-    } */
     var filteredEpisodes: [Episode] {
         episodes.filter { episode in
             if hideArchived && trackingManager.isArchived(episode.id) {
@@ -3409,13 +3101,6 @@ struct PodcastDetailView: View {
                 Task {
                     await fetchEpisodes(from: feedUrl)
                 }
-                
-                /*
-                 if !hasLoadedEpisodes {
-                 if let feedUrl = podcast.feedUrl {
-                 Task {
-                 await fetchEpisodes(from: feedUrl)
-                 } */
             } else {
                     loadingError = "This podcast doesn't have a valid RSS feed URL."
                     hasLoadedEpisodes = true
@@ -3967,9 +3652,7 @@ struct PodcastDetailView: View {
                 }
             
             hasLoadedEpisodes = true
-            
-      //      let nsError = error as NSError
-            
+                        
             // Handle specific error types
             switch nsError.code {
             case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
@@ -4141,10 +3824,6 @@ struct EpisodeRowView: View {
                                 .foregroundColor(.orange)
                         }
                         
-                /*        if downloadManager.isDownloading(episode.id) {
-                            ProgressView()
-                                .scaleEffect(0.6)
-                                .frame(width: 12, height: 12) */
                         if downloadManager.isDownloading(episode.id) {
                             let progress = downloadManager.downloadProgress[episode.id] ?? 0.0
                             ZStack {
@@ -4445,7 +4124,6 @@ struct EpisodeDetailView: View {
                 }
             }
             .id(audioVM.showMiniPlayer)
-//            .padding(.bottom, audioVM.showMiniPlayer ? 80 : 0)
         }
         .navigationTitle("Episode")
         .navigationBarTitleDisplayMode(.inline)
@@ -4503,7 +4181,6 @@ struct EpisodeDescriptionView: View {
                 // Apply appropriate color based on whether it's a link
                 if hasLink {
                     swiftUIAttrStr[run.range].foregroundColor = .blue
-                    // Optional: add underline to links
                     swiftUIAttrStr[run.range].underlineStyle = .single
                 } else {
                     swiftUIAttrStr[run.range].foregroundColor = colorScheme == .dark ? .white : .black
@@ -4634,7 +4311,6 @@ struct EpisodePlayerView: View {
                 }
             }
             .id(audioVM.showMiniPlayer)
- //           .padding(.bottom, audioVM.showMiniPlayer ? 80 : 0)
         }
         .navigationTitle("Now Playing")
         .navigationBarTitleDisplayMode(.inline)
@@ -5264,11 +4940,9 @@ struct QueueView: View {
 // MARK: - StatisticsView
 struct StatisticsView: View {
     @ObservedObject private var statsManager = StatisticsManager.shared
-//    @ObservedObject private var sessionManager = SessionManager.shared
     @ObservedObject private var audioVM = AudioPlayerViewModel.shared
     @State private var selectedPeriod: StatsPeriod = .allTime
     @State private var selectedTab: StatsTab = .overview
-//    @State private var selectedSession: UserSession?
     @State private var showClearConfirmation = false
     
     enum StatsTab: String, CaseIterable {
@@ -5322,15 +4996,11 @@ struct StatisticsView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu("More") {
                         Button("Clear All Data", role: .destructive) {
-                   //         statsManager.clearAllStats()
                             showClearConfirmation = true
                         }
                     }
                 }
             }
- //           .navigationDestination(item: $selectedSession) { session in
- //               SessionDetailView(session: session)
- //           }
             .alert("Clear All Statistics?", isPresented: $showClearConfirmation) {
                 Button("Cancel", role: .cancel) { }
                 Button("Clear All", role: .destructive) {
@@ -5504,244 +5174,6 @@ struct ComingSoonStatsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
-/*
-// MARK: - SessionsStatsView
-struct SessionsStatsView: View {
-    @ObservedObject private var sessionManager = SessionManager.shared
-    @Binding var selectedSession: UserSession?
-    
-    var longestSessions: [UserSession] {
-        Array(sessionManager.userSessions
-            .sorted { $0.totalDuration > $1.totalDuration }
-            .prefix(3))
-    }
-    
-    var mostRecentSessions: [UserSession] {
-        Array(sessionManager.userSessions
-            .sorted { $0.endTime > $1.endTime }
-            .prefix(3))
-    }
-    
-    var mostEpisodesSession: [UserSession] {
-        Array(sessionManager.userSessions
-            .sorted { $0.episodes.count > $1.episodes.count }
-            .prefix(3))
-    }
-    
-    var todaysSessions: [UserSession] {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        
-        return sessionManager.userSessions.filter { session in
-            calendar.isDate(session.startTime, inSameDayAs: today)
-        }.sorted { $0.endTime > $1.endTime }
-    }
-    
-    var thisWeeksSessions: [UserSession] {
-        let calendar = Calendar.current
-        let weekAgo = calendar.date(byAdding: .day, value: -7, to: Date()) ?? Date()
-        
-        return sessionManager.userSessions.filter { session in
-            session.startTime >= weekAgo
-        }.sorted { $0.endTime > $1.endTime }
-    }
-    
-    var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 20) {
-                if sessionManager.userSessions.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: "list.bullet")
-                            .font(.system(size: 50))
-                            .foregroundColor(.gray)
-                        
-                        Text("No Sessions Yet")
-                            .font(.title2)
-                            .foregroundColor(.gray)
-                        
-                        Text("Start listening to create your first session")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding()
-                } else {
-                    // Today's Sessions
-                    if !todaysSessions.isEmpty {
-                        SessionCategoryView(
-                            title: "Today",
-                            sessions: todaysSessions,
-                            icon: "calendar.badge.clock",
-                            selectedSession: $selectedSession
-                        )
-                    }
-                    
-                    // This Week's Sessions
-                    if !thisWeeksSessions.isEmpty {
-                        SessionCategoryView(
-                            title: "This Week",
-                            sessions: thisWeeksSessions,
-                            icon: "calendar",
-                            selectedSession: $selectedSession
-                        )
-                    }
-                    
-                    // Longest Sessions
-                    if !longestSessions.isEmpty {
-                        SessionCategoryView(
-                            title: "Longest Sessions",
-                            sessions: longestSessions,
-                            icon: "crown.fill",
-                            selectedSession: $selectedSession
-                        )
-                    }
-                    
-                    // Most Episodes
-                    if !mostEpisodesSession.isEmpty {
-                        SessionCategoryView(
-                            title: "Most Episodes",
-                            sessions: mostEpisodesSession,
-                            icon: "list.number",
-                            selectedSession: $selectedSession
-                        )
-                    }
-                    
-                    // Most Recent Sessions
-                    if !mostRecentSessions.isEmpty {
-                        SessionCategoryView(
-                            title: "Recent Sessions",
-                            sessions: mostRecentSessions,
-                            icon: "clock.fill",
-                            selectedSession: $selectedSession
-                        )
-                    }
-                    
-                    // Total Stats Summary
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Summary")
-                            .font(.title3)
-                            .fontWeight(.bold)
-                            .padding(.horizontal)
-                        
-                        VStack(spacing: 8) {
-                            HStack {
-                                Text("Total Sessions")
-                                Spacer()
-                                Text("\(sessionManager.userSessions.count)")
-                                    .fontWeight(.semibold)
-                            }
-                            
-                            HStack {
-                                Text("Total Listening Time")
-                                Spacer()
-                                Text(DurationFormatter.formatLongDuration(
-                                    sessionManager.userSessions.reduce(0) { $0 + $1.totalDuration }
-                                ))
-                                .fontWeight(.semibold)
-                            }
-                            
-                            HStack {
-                                Text("Average Session")
-                                Spacer()
-                                let avgDuration = sessionManager.userSessions.isEmpty ? 0 :
-                                    sessionManager.userSessions.reduce(0) { $0 + $1.totalDuration } / Double(sessionManager.userSessions.count)
-                                Text(DurationFormatter.formatDuration(avgDuration))
-                                    .fontWeight(.semibold)
-                            }
-                        }
-                        .font(.subheadline)
-                        .padding()
-                        .background(Color(.systemGray6))
-                        .cornerRadius(12)
-                    }
-                }
-            }
-            .padding()
-        }
-    }
-}
-
-// MARK: - SessionCategoryView
-struct SessionCategoryView: View {
-    let title: String
-    let sessions: [UserSession]
-    let icon: String
-    @Binding var selectedSession: UserSession?
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: icon)
-                    .foregroundColor(.blue)
-                
-                Text(title)
-                    .font(.title3)
-                    .fontWeight(.bold)
-                
-                Spacer()
-                
-                Text("\(sessions.count)")
-                    .font(.caption)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.blue)
-                    .cornerRadius(8)
-            }
-            .padding(.horizontal)
-            
-            ForEach(sessions) { session in
-                Button(action: {
-                    selectedSession = session
-                }) {
-                    SessionCardView(session: session)
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-        }
-    }
-}
-
-struct SessionCardView: View {
-    let session: UserSession
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Session #\(session.sessionNumber)")
-                    .font(.headline)
-                
-                Spacer()
-                
-                Text(DurationFormatter.formatLongDuration(session.totalDuration))
-                    .font(.title3)
-                    .fontWeight(.bold)
-                    .foregroundColor(.blue)
-            }
-            
-            HStack {
-                Text(session.startTime.formatted(date: .abbreviated, time: .omitted))
-                    .font(.caption)
-                    .foregroundColor(.gray)
-                
-                Text("•")
-                    .foregroundColor(.gray)
-                
-                Text("\(session.startTime.formatted(date: .omitted, time: .shortened)) - \(session.endTime.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            
-            Text("\(session.episodes.count) episode\(session.episodes.count == 1 ? "" : "s")")
-                .font(.caption)
-                .foregroundColor(.gray)
-        }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
-    }
-} */
 
 //MARK: - SettingsView
 struct SettingsView: View {
@@ -5855,144 +5287,6 @@ struct PlaybackSpeedSettingView: View {
         .padding(.vertical, 4)
     }
 }
-/*
-struct SessionDetailView: View {
-    let session: UserSession
-    
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                // Session Header
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Session #\(session.sessionNumber)")
-                        .font(.title)
-                        .fontWeight(.bold)
-                    
-                    Text("Total Duration: \(DurationFormatter.formatLongDuration(session.totalDuration))")
-                        .font(.headline)
-                        .foregroundColor(.blue)
-                    
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("Started")
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                            Text(session.startTime.formatted(date: .abbreviated, time: .shortened))
-                                .font(.subheadline)
-                        }
-                        
-                        Spacer()
-                        
-                        VStack(alignment: .trailing) {
-                            Text("Ended")
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                            Text(session.endTime.formatted(date: .abbreviated, time: .shortened))
-                                .font(.subheadline)
-                        }
-                    }
-                }
-                .padding()
-                .background(Color(.systemGray6))
-                .cornerRadius(12)
-                
-                // Pie Chart
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Time Distribution")
-                        .font(.headline)
-                        .padding(.horizontal)
-                    
-                    Chart(session.episodes) { episode in
-                        SectorMark(
-                            angle: .value("Duration", episode.duration),
-                            innerRadius: .ratio(0.5),
-                            angularInset: 1.5
-                        )
-                        .foregroundStyle(by: .value("Episode", episode.episodeTitle))
-                        .annotation(position: .overlay) {
-                            Text("\(Int((episode.duration / session.totalDuration) * 100))%")
-                                .font(.caption2)
-                                .fontWeight(.bold)
-                                .foregroundColor(.white)
-                        }
-                    }
-                    .frame(height: 300)
-                    .padding()
-                }
-                .background(Color(.systemGray6))
-                .cornerRadius(12)
-                
-                // Episode List
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Episodes (\(session.episodes.count))")
-                        .font(.headline)
-                        .padding(.horizontal)
-                    
-                    ForEach(session.episodes) { episode in
-                        SessionEpisodeRowView(episode: episode, totalDuration: session.totalDuration)
-                    }
-                }
-            }
-            .padding()
-        }
-        .navigationTitle("Session Details")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-struct SessionEpisodeRowView: View {
-    let episode: EpisodeSession
-    let totalDuration: TimeInterval
-    
-    var percentage: Int {
-        Int((episode.duration / totalDuration) * 100)
-    }
-    
-    var body: some View {
-        HStack(spacing: 12) {
-            if let imageURL = episode.imageURL {
-                CachedAsyncImage(url: URL(string: imageURL)) { image in
-                    image.resizable()
-                } placeholder: {
-                    Color.gray
-                }
-                .frame(width: 50, height: 50)
-                .cornerRadius(8)
-            }
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text(episode.episodeTitle)
-                    .font(.subheadline)
-                    .lineLimit(2)
-                
-                Text(episode.podcastName)
-                    .font(.caption)
-                    .foregroundColor(.gray)
-                
-                HStack {
-                    Text(DurationFormatter.formatDuration(episode.duration))
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                    
-                    Text("• \(percentage)% of session")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                }
-            }
-            
-            Spacer()
-            
-            if episode.completed {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-            }
-        }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(8)
-    }
-} */
-
 
 // MARK: - Supporting Views
 
@@ -6080,63 +5374,12 @@ struct PodcastStatsCardView: View {
                     .fontWeight(.bold)
                     .foregroundColor(.blue)
             }
-            /*
-            HStack {
-                Label(podcastStat.averageListeningTimeFormatted, systemImage: "clock")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-                
-                Spacer()
-                
-                Label("\(Int(podcastStat.completionRate))%", systemImage: "checkmark.circle")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            } */
         }
         .padding()
         .background(Color(.systemGray6))
         .cornerRadius(12)
     }
 }
-/*
-struct SessionRowView: View {
-    let session: ListeningSession
-    
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(session.episodeTitle)
-                    .font(.subheadline)
-                    .lineLimit(2)
-                
-                Text(session.podcastName)
-                    .font(.caption)
-                    .foregroundColor(.gray)
-                
-                Text(session.startTime.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption2)
-                    .foregroundColor(.gray)
-            }
-            
-            Spacer()
-            
-            VStack(alignment: .trailing) {
-                Text(StatisticsManager.formatDuration(session.duration))
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                
-                if session.completed {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                        .font(.caption)
-                }
-            }
-        }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(8)
-    }
-} */
 
 //MARK: - Episode Context Menu
 extension View {
@@ -6167,7 +5410,9 @@ struct HomeDownloadedEpisodeContextMenu: View {
             if audioVM.episode?.id == episode.id {
                 audioVM.togglePlayPause()
             } else {
-                audioVM.playNow(episode, podcastImageURL: episode.podcastImageURL)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    audioVM.playNow(episode, podcastImageURL: episode.podcastImageURL)
+                }
             }
         }) {
             Label(
